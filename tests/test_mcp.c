@@ -847,6 +847,9 @@ TEST(mcp_tools_have_behavior_annotations) {
         bool open_world;
     } expected[] = {
         {"index_repository", false, false, true, false},
+        /* explore shares the query tools' conservative annotations (its store
+         * resolution path is the same resolve_store()). */
+        {"explore", false, true, true, false},
         /* These query tools can reach resolve_store(), whose corrupt-store
          * recovery quarantines/removes database files. Keep the annotations
          * conservative until query resolution is strictly non-mutating. */
@@ -1227,6 +1230,7 @@ TEST(server_handle_tools_list) {
     ASSERT_NOT_NULL(strstr(resp, "\"id\":2"));
     ASSERT_NOT_NULL(strstr(resp, "search_graph"));
     ASSERT_NOT_NULL(strstr(resp, "query_graph"));
+    ASSERT_NOT_NULL(strstr(resp, "\"explore\"")); /* registered + its inputSchema is valid JSON */
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -1284,9 +1288,9 @@ TEST(server_handle_analysis_profile_filters_and_rejects_mutators) {
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":220,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     static const char *const analysis_tools[] = {
-        "search_graph",     "query_graph",          "trace_path",     "get_code_snippet",
-        "get_graph_schema", "get_architecture",     "search_code",    "list_projects",
-        "index_status",     "check_index_coverage", "detect_changes",
+        "explore",         "search_graph",     "query_graph",    "trace_path",
+        "get_code_snippet", "get_graph_schema", "get_architecture", "search_code",
+        "list_projects",    "index_status",     "check_index_coverage", "detect_changes",
     };
     ASSERT_EQ(mcp_response_tool_count(resp), sizeof(analysis_tools) / sizeof(analysis_tools[0]));
     for (size_t i = 0U; i < sizeof(analysis_tools) / sizeof(analysis_tools[0]); i++) {
@@ -1325,7 +1329,8 @@ TEST(server_handle_scout_profile_exposes_only_the_fast_tier) {
 
     resp = cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":223,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
-    ASSERT_EQ(mcp_response_tool_count(resp), 7U);
+    ASSERT_EQ(mcp_response_tool_count(resp), 8U);
+    ASSERT_TRUE(mcp_response_has_exact_tool(resp, "explore"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "search_graph"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "trace_path"));
     ASSERT_TRUE(mcp_response_has_exact_tool(resp, "get_code_snippet"));
@@ -1591,6 +1596,34 @@ TEST(tool_unknown_tool) {
     ASSERT_NOT_NULL(strstr(resp, "isError"));
     free(resp);
 
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* explore (WS1): missing query → clean required-field error, no crash. */
+TEST(tool_explore_requires_query) {
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":"
+             "\"explore\",\"arguments\":{\"project\":\"none\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    ASSERT_NOT_NULL(strstr(resp, "query is required"));
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* explore (WS1): unindexed project → clean error envelope, no crash (exercises the
+ * store-resolution + cleanup paths of handle_explore on an empty server). */
+TEST(tool_explore_unindexed_no_crash) {
+    cbm_mcp_server_t *srv = setup_mcp_with_data();
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":"
+             "\"explore\",\"arguments\":{\"query\":\"foo bar\",\"project\":\"nope\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "isError"));
+    free(resp);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -10329,6 +10362,8 @@ SUITE(mcp) {
     RUN_TEST(tool_list_projects_empty);
     RUN_TEST(tool_get_graph_schema_empty);
     RUN_TEST(tool_unknown_tool);
+    RUN_TEST(tool_explore_requires_query);
+    RUN_TEST(tool_explore_unindexed_no_crash);
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_trace_totals_respect_test_filter);
     RUN_TEST(tool_get_architecture_cycles_detects_scc);
