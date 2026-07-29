@@ -419,6 +419,35 @@ TEST(java_interface) {
     PASS();
 }
 
+/* Regression for #1234: Java interface methods were emitted as both a Method
+ * node (correct, via extract_class_methods) and a duplicate Function node
+ * (incorrect, via the walk_defs fallback). push_class_body_children did not
+ * recognize interface_body as a class body container, so method_declaration
+ * children were re-walked and extracted as top-level functions. */
+TEST(java_interface_no_duplicate_function_issue1234) {
+    CBMFileResult *r =
+        extract("public interface MarketplaceService {\n"
+                "    ReservationDTO createReservation(Authentication auth, RequestDTO req);\n"
+                "    void cancelReservation(long id);\n"
+                "}\n",
+                CBM_LANG_JAVA, "t", "MarketplaceService.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* The interface itself must exist. */
+    ASSERT(has_def(r, "Interface", "MarketplaceService"));
+
+    /* Each method must be a Method, not a Function. */
+    ASSERT(has_def(r, "Method", "createReservation"));
+    ASSERT(has_def(r, "Method", "cancelReservation"));
+
+    /* No Function nodes should exist for interface methods. */
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Regression for #279: a Java class declaring both `extends` and
  * `implements` must produce one INHERITS edge per base — the extends parent
  * AND every implements interface — with bare type names (not the keyword
@@ -4947,6 +4976,7 @@ SUITE(extraction) {
     RUN_TEST(java_class);
     RUN_TEST(java_method);
     RUN_TEST(java_interface);
+    RUN_TEST(java_interface_no_duplicate_function_issue1234);
     RUN_TEST(java_class_extends_and_implements);
     RUN_TEST(python_class_base_extracted_bare);
     RUN_TEST(php_class);

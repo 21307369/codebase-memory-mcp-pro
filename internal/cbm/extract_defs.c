@@ -6349,6 +6349,7 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
         if (strcmp(ck, "field_declaration_list") == 0 || strcmp(ck, "class_body") == 0 ||
             strcmp(ck, "declaration_list") == 0 || strcmp(ck, "body") == 0 ||
             strcmp(ck, "block") == 0 || strcmp(ck, "suite") == 0 ||
+            strcmp(ck, "interface_body") == 0 || strcmp(ck, "enum_body") == 0 ||
             // Groovy class bodies are a `closure` node; routing through the
             // nested-class path keeps methods from being re-walked (and thus
             // double-extracted) as top-level functions. Gated to Groovy so other
