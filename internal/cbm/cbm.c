@@ -1239,6 +1239,8 @@ CBMFileResult *cbm_extract_file_ex(const char *source, int source_len, CBMLangua
     cbm_extract_imports(&ctx);
     cbm_extract_unified(&ctx);
 
+    cbm_dedup_class_method_functions(result);
+
     // Channel detection (Socket.IO / EventEmitter) — JS/TS only.
     cbm_extract_channels(&ctx);
 

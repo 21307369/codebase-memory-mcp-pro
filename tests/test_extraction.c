@@ -419,11 +419,12 @@ TEST(java_interface) {
     PASS();
 }
 
-/* Regression for #1234: Java interface methods were emitted as both a Method
- * node (correct, via extract_class_methods) and a duplicate Function node
- * (incorrect, via the walk_defs fallback). push_class_body_children did not
- * recognize interface_body as a class body container, so method_declaration
- * children were re-walked and extracted as top-level functions. */
+/* Regression for #1234: Java interface/enum methods were emitted as both a
+ * Method node (correct, via extract_class_methods) and a duplicate Function
+ * node (incorrect, via walk_defs). cbm_dedup_class_method_functions merges
+ * the duplicate by removing the Function and rewriting any call records whose
+ * enclosing_func_qn referenced the Function QN to use the surviving Method QN.
+ * This test covers both interface and enum bodies. */
 TEST(java_interface_no_duplicate_function_issue1234) {
     CBMFileResult *r =
         extract("public interface MarketplaceService {\n"
@@ -434,15 +435,36 @@ TEST(java_interface_no_duplicate_function_issue1234) {
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
 
-    /* The interface itself must exist. */
     ASSERT(has_def(r, "Interface", "MarketplaceService"));
-
-    /* Each method must be a Method, not a Function. */
     ASSERT(has_def(r, "Method", "createReservation"));
     ASSERT(has_def(r, "Method", "cancelReservation"));
-
-    /* No Function nodes should exist for interface methods. */
     ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(java_enum_dedup_preserves_calls_issue1234) {
+    CBMFileResult *r =
+        extract("package app;\n\nenum Day {\n"
+                "    MON, TUE, WED, THU, FRI, SAT, SUN;\n\n"
+                "    public boolean isWeekend() { return this == SAT || this == SUN; }\n"
+                "    public String label() { return name().toLowerCase(); }\n}\n\n"
+                "class DayUtil {\n"
+                "    static String describe(Day d) {\n"
+                "        return d.label() + (d.isWeekend() ? \"(rest)\" : \"(work)\");\n    }\n}\n",
+                CBM_LANG_JAVA, "t", "Day.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT(has_def(r, "Enum", "Day"));
+    ASSERT(has_def(r, "Method", "isWeekend"));
+    ASSERT(has_def(r, "Method", "label"));
+    ASSERT(has_def(r, "Class", "DayUtil"));
+    ASSERT(has_def(r, "Method", "describe"));
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    ASSERT_TRUE(r->calls.count >= 1);
 
     cbm_free_result(r);
     PASS();
@@ -4977,6 +4999,7 @@ SUITE(extraction) {
     RUN_TEST(java_method);
     RUN_TEST(java_interface);
     RUN_TEST(java_interface_no_duplicate_function_issue1234);
+    RUN_TEST(java_enum_dedup_preserves_calls_issue1234);
     RUN_TEST(java_class_extends_and_implements);
     RUN_TEST(python_class_base_extracted_bare);
     RUN_TEST(php_class);

@@ -1144,6 +1144,32 @@ TEST(cp_enum_method_java) {
     PASS();
 }
 
+/* D6d — Java interface method call after dedup (#1234).
+ * cbm_dedup_class_method_functions merges duplicate Function nodes into
+ * Method nodes for interface/enum bodies. The surviving Method must still
+ * carry CALLS edges — dedup must be a merge, not a delete. */
+TEST(cp_interface_method_calls_after_dedup) {
+    static const CP_File f[] = {
+        {"Svc.java",
+         "package app;\n\n"
+         "interface Greeter {\n"
+         "    String greet(String name);\n}\n\n"
+         "class SimpleGreeter implements Greeter {\n"
+         "    public String greet(String name) { return \"Hello \" + name; }\n}\n\n"
+         "class App {\n"
+         "    static String run(Greeter g) {\n"
+         "        return g.greet(\"world\");\n    }\n}\n"}};
+    CP_Proj lp;
+    cbm_store_t *store = cp_index_files(&lp, f, 1);
+    int calls = cp_edges(store, lp.project, "CALLS");
+    int fns   = cp_count_label(store, lp.project, "Function");
+    if (calls < 1) cp_diag(store, lp.project, "interface_dedup/java_1234");
+    cp_cleanup(&lp, store);
+    ASSERT_TRUE(fns == 0);
+    ASSERT_TRUE(calls >= 1);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  * AREA E — Node-creation corners
  * ══════════════════════════════════════════════════════════════════ */
@@ -1574,6 +1600,8 @@ SUITE(convergence_probe) {
     RUN_TEST(cp_enum_variant_rust_impl);
     /* D6c Java enum method     — EXPECTED UNCERTAIN */
     RUN_TEST(cp_enum_method_java);
+    /* D6d Java interface dedup  — #1234 regression */
+    RUN_TEST(cp_interface_method_calls_after_dedup);
 
     /* ── AREA E1: Nested classes (3 cases) ──────────── */
     /* E1a Python inner class   — EXPECTED GREEN */
