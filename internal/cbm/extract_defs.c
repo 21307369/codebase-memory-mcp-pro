@@ -6368,6 +6368,10 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
         if (strcmp(ck, "field_declaration_list") == 0 || strcmp(ck, "class_body") == 0 ||
             strcmp(ck, "declaration_list") == 0 || strcmp(ck, "body") == 0 ||
             strcmp(ck, "block") == 0 || strcmp(ck, "suite") == 0 ||
+            // Java interface/enum bodies: gated to Java so grammars that
+            // share these node names (TypeScript, Apex, Dart) are unaffected.
+            (strcmp(ck, "interface_body") == 0 && spec->language == CBM_LANG_JAVA) ||
+            (strcmp(ck, "enum_body") == 0 && spec->language == CBM_LANG_JAVA) ||
             // Groovy class bodies are a `closure` node; routing through the
             // nested-class path keeps methods from being re-walked (and thus
             // double-extracted) as top-level functions. Gated to Groovy so other
@@ -6932,54 +6936,4 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
 
     // Extract module-level variables
     extract_variables(ctx, ctx->root, spec);
-}
-
-void cbm_dedup_class_method_functions(CBMFileResult *result) {
-    if (!result || result->defs.count < 2) {
-        return;
-    }
-    CBMDefArray *defs = &result->defs;
-    for (int fi = defs->count - 1; fi >= 0; fi--) {
-        CBMDefinition *func = &defs->items[fi];
-        if (!func->label || strcmp(func->label, "Function") != 0) {
-            continue;
-        }
-        if (!func->name || !func->file_path) {
-            continue;
-        }
-        for (int mi = 0; mi < defs->count; mi++) {
-            if (mi == fi) {
-                continue;
-            }
-            CBMDefinition *method = &defs->items[mi];
-            if (!method->label || strcmp(method->label, "Method") != 0) {
-                continue;
-            }
-            if (!method->name || strcmp(method->name, func->name) != 0) {
-                continue;
-            }
-            if (!method->file_path || strcmp(method->file_path, func->file_path) != 0) {
-                continue;
-            }
-            if (method->start_line != func->start_line) {
-                continue;
-            }
-            const char *func_qn = func->qualified_name;
-            const char *method_qn = method->qualified_name;
-            if (func_qn && method_qn) {
-                for (int ci = 0; ci < result->calls.count; ci++) {
-                    CBMCall *call = &result->calls.items[ci];
-                    if (call->enclosing_func_qn && strcmp(call->enclosing_func_qn, func_qn) == 0) {
-                        call->enclosing_func_qn = method_qn;
-                    }
-                }
-            }
-            if (fi < defs->count - 1) {
-                memmove(&defs->items[fi], &defs->items[fi + 1],
-                        (size_t)(defs->count - fi - 1) * sizeof(defs->items[0]));
-            }
-            defs->count--;
-            break;
-        }
-    }
 }

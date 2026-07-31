@@ -421,10 +421,10 @@ TEST(java_interface) {
 
 /* Regression for #1234: Java interface/enum methods were emitted as both a
  * Method node (correct, via extract_class_methods) and a duplicate Function
- * node (incorrect, via walk_defs). cbm_dedup_class_method_functions merges
- * the duplicate by removing the Function and rewriting any call records whose
- * enclosing_func_qn referenced the Function QN to use the surviving Method QN.
- * This test covers both interface and enum bodies. */
+ * node (incorrect, via walk_defs). Prevention in push_class_body_children
+ * (gated to Java) recognizes interface_body and enum_body as class body
+ * containers, stopping the fallback path from re-walking method_declaration
+ * children as top-level functions. */
 TEST(java_interface_no_duplicate_function_issue1234) {
     CBMFileResult *r =
         extract("public interface MarketplaceService {\n"

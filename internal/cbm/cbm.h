@@ -596,12 +596,6 @@ CBMFileResult *cbm_extract_file_ex(
     const CBMReturnTypeTable *return_type_table // OS return types, or NULL
 );
 
-// Merge-dedup: remove Function defs that duplicate a Method def at the same
-// location, rewriting any call records that referenced the Function QN to use
-// the surviving Method QN. Must run after both cbm_extract_definitions and
-// cbm_extract_unified so that result->calls is populated.
-void cbm_dedup_class_method_functions(CBMFileResult *result);
-
 // Free all memory associated with a result.
 void cbm_free_result(CBMFileResult *result);
 

@@ -1144,11 +1144,11 @@ TEST(cp_enum_method_java) {
     PASS();
 }
 
-/* D6d — Java interface method call after dedup (#1234).
- * cbm_dedup_class_method_functions merges duplicate Function nodes into
- * Method nodes for interface/enum bodies. The surviving Method must still
- * carry CALLS edges — dedup must be a merge, not a delete. */
-TEST(cp_interface_method_calls_after_dedup) {
+/* D6d — Java interface method call (#1234).
+ * Prevention in push_class_body_children stops duplicate Function nodes
+ * from being minted for interface methods. The surviving Method node
+ * must still carry its CALLS edge. */
+TEST(cp_interface_method_no_dup_function) {
     static const CP_File f[] = {
         {"Svc.java",
          "package app;\n\n"
@@ -1600,8 +1600,8 @@ SUITE(convergence_probe) {
     RUN_TEST(cp_enum_variant_rust_impl);
     /* D6c Java enum method     — EXPECTED UNCERTAIN */
     RUN_TEST(cp_enum_method_java);
-    /* D6d Java interface dedup  — #1234 regression */
-    RUN_TEST(cp_interface_method_calls_after_dedup);
+    /* D6d Java interface method — #1234 regression */
+    RUN_TEST(cp_interface_method_no_dup_function);
 
     /* ── AREA E1: Nested classes (3 cases) ──────────── */
     /* E1a Python inner class   — EXPECTED GREEN */
