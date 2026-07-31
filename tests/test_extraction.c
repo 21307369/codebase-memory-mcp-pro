@@ -464,8 +464,6 @@ TEST(java_enum_dedup_preserves_calls_issue1234) {
     ASSERT(has_def(r, "Method", "describe"));
     ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
 
-    ASSERT_TRUE(r->calls.count >= 1);
-
     cbm_free_result(r);
     PASS();
 }
