@@ -11,6 +11,8 @@ void *cbm_memmem(const void *haystack, size_t haystack_len, const void *needle, 
 
 // Extract text of a node from source. Returns arena-allocated string.
 char *cbm_node_text(CBMArena *a, TSNode node, const char *source);
+/* Flatten a template string node: concatenate string_fragment parts, substitutions become {} (see #1249). NULL on overflow/no text. */
+const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *source);
 
 // Check if a string is a language keyword (should be skipped as callee/usage).
 bool cbm_is_keyword(const char *name, CBMLanguage lang);

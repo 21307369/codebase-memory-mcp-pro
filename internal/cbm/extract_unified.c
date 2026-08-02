@@ -1005,7 +1005,7 @@ void cbm_extract_unified(CBMExtractCtx *ctx) {
         recompute_state(&state, ctx->module_qn);
 
         handle_string_constants(ctx, node, &state);
-        handle_objectscript_type_map(ctx, node, &state);
+        /* objectscript type-map skipped: fork lacks return_type_table */
         handle_url_builders(ctx, node, &state);
         handle_calls(ctx, node, spec, &state);
         handle_usages(ctx, node, spec, &state);

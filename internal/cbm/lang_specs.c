@@ -1753,7 +1753,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_HTML] = {CBM_LANG_HTML, empty_types, empty_types, empty_types, html_module_types,
                        empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
                        empty_types, NULL, empty_types, NULL, NULL, tree_sitter_html,
-                       html_embedded_imports},
+                       html_embedded_imports, NULL},
 
     // CBM_LANG_CSS
     [CBM_LANG_CSS] = {CBM_LANG_CSS, empty_types, empty_types, empty_types, css_module_types,
@@ -1852,7 +1852,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_COBOL] = {CBM_LANG_COBOL, cobol_func_types, empty_types, empty_types,
                         cobol_module_types, cobol_call_types, cobol_import_types, empty_types,
                         cobol_branch_types, cobol_var_types, empty_types, empty_types, NULL,
-                        empty_types, NULL, NULL, tree_sitter_COBOL, NULL},
+                        empty_types, NULL, NULL, tree_sitter_COBOL, NULL, NULL},
 
     // CBM_LANG_VERILOG
     [CBM_LANG_VERILOG] = {CBM_LANG_VERILOG, verilog_func_types, verilog_class_types, empty_types,
@@ -1912,13 +1912,13 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_VUE] = {CBM_LANG_VUE, empty_types, empty_types, empty_types, vue_module_types,
                       empty_types, empty_types, empty_types, empty_types, empty_types, empty_types,
                       empty_types, NULL, empty_types, NULL, NULL, tree_sitter_vue,
-                      vue_embedded_imports},
+                      vue_embedded_imports, NULL},
 
     // CBM_LANG_SVELTE
     [CBM_LANG_SVELTE] = {CBM_LANG_SVELTE, empty_types, empty_types, empty_types,
                          svelte_module_types, empty_types, empty_types, empty_types,
                          svelte_branch_types, empty_types, empty_types, empty_types, NULL,
-                         empty_types, NULL, NULL, tree_sitter_svelte, svelte_embedded_imports},
+                         empty_types, NULL, NULL, tree_sitter_svelte, svelte_embedded_imports, NULL},
 
     // CBM_LANG_MESON
     [CBM_LANG_MESON] = {CBM_LANG_MESON, meson_func_types, empty_types, empty_types,
@@ -2165,7 +2165,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_ASTRO] = {CBM_LANG_ASTRO, empty_types, empty_types, empty_types, astro_module_types,
                         empty_types, empty_types, empty_types, empty_types, empty_types,
                         empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_astro,
-                        astro_embedded_imports},
+                        astro_embedded_imports, NULL},
 
     // CBM_LANG_BLADE
     [CBM_LANG_BLADE] = {CBM_LANG_BLADE, empty_types, empty_types, empty_types, blade_module_types,

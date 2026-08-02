@@ -11,6 +11,8 @@
 #ifndef CBM_SERVICE_PATTERNS_H
 #define CBM_SERVICE_PATTERNS_H
 
+#include <stdbool.h>
+
 /* Edge type returned by pattern match. */
 typedef enum {
     CBM_SVC_NONE = 0,      /* Not a service pattern — use normal CALLS */
