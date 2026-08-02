@@ -200,6 +200,7 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
  * Pure; unit-tested in test_registry.c. */
 bool cbm_python_suppress_weak_generic_call(bool is_python, bool is_method, const char *callee_name,
                                            const char *strategy);
+bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy);
 
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);

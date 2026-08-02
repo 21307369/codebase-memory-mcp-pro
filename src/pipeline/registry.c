@@ -482,6 +482,22 @@ bool cbm_python_suppress_weak_generic_call(bool is_python, bool is_method, const
     return cbm_python_is_generic_callee_name(callee_name); /* bare run()/get()/execute() */
 }
 
+bool cbm_tsjs_suppress_weak_method_match(bool is_tsjs, bool is_method, const char *strategy) {
+    if (!is_tsjs || !is_method || !strategy || !strategy[0]) {
+        return false;
+    }
+    /* Weak short-name strategies that actually reach the call-resolution guards:
+     * the registry's suffix_match / unique_name and the parallel field_type_hint.
+     * "fuzzy" is listed as defensive insurance only — cbm_registry_fuzzy_resolve
+     * is not wired into the sequential/parallel resolvers today, so it never
+     * reaches this helper, but naming it keeps a future wiring from silently
+     * reintroducing the noise. Everything else — same_module / import_map /
+     * import_map_suffix / qualified_suffix / callee_suffix / service_pattern /
+     * lsp_* — is a receiver- or import-aware match and is KEPT. */
+    return strcmp(strategy, "suffix_match") == 0 || strcmp(strategy, "unique_name") == 0 ||
+           strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
+}
+
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {

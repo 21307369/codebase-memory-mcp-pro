@@ -357,7 +357,7 @@ static const cbm_gbuf_node_t *calls_find_source(cbm_pipeline_ctx_t *ctx, const c
 static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
                                const CBMResolvedCallArray *lsp_calls, const char *rel,
                                const char *module_qn, const char **imp_keys, const char **imp_vals,
-                               int imp_count) {
+                               int imp_count, CBMLanguage lang) {
     const cbm_gbuf_node_t *source_node = calls_find_source(ctx, rel, call->enclosing_func_qn);
     if (!source_node) {
         return 0;
@@ -377,7 +377,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
             res.strategy = lsp->strategy;
             res.candidate_count = 1;
             emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys,
-                                 imp_vals, imp_count);
+                                 imp_vals, imp_count, false);
             return SKIP_ONE;
         }
     }
@@ -515,7 +515,7 @@ int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
             }
             total_calls++;
             if (resolve_single_call(ctx, call, &result->resolved_calls, rel, module_qn, imp_keys,
-                                    imp_vals, imp_count)) {
+                                    imp_vals, imp_count, files[i].language)) {
                 resolved++;
             } else {
                 unresolved++;
