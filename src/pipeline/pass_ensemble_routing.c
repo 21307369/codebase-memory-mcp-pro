@@ -176,7 +176,7 @@ static ens_prod_def_t *parse_production_xml(const char *xml, const char *class_q
 }
 
 static char *read_file(const char *full_path) {
-    FILE *f = cbm_fopen(full_path, "rb");
+    FILE *f = fopen(full_path, "rb");
     if (!f)
         return NULL;
     fseek(f, 0, SEEK_END);
