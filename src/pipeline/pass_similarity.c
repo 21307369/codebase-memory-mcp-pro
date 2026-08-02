@@ -80,6 +80,22 @@ static const char *itoa_log(int val) {
     return bufs[i];
 }
 
+static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
+    const fp_entry_t *a = pa;
+    const fp_entry_t *b = pb;
+    const char *qa = a->qn ? a->qn : "";
+    const char *qb = b->qn ? b->qn : "";
+    int r = strcmp(qa, qb);
+    if (r != 0) {
+        return r;
+    }
+    if (a->node_id != b->node_id) {
+        return a->node_id < b->node_id ? -1 : 1;
+    }
+    return 0;
+}
+
+
 /* ── Internal types ──────────────────────────────────────────────── */
 
 enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2, PROPS_BUF_LEN = 256 };
@@ -127,22 +143,7 @@ static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
             };
         }
     }
-    static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
-    const fp_entry_t *a = pa;
-    const fp_entry_t *b = pb;
-    const char *qa = a->qn ? a->qn : "";
-    const char *qb = b->qn ? b->qn : "";
-    int r = strcmp(qa, qb);
-    if (r != 0) {
-        return r;
-    }
-    if (a->node_id != b->node_id) {
-        return a->node_id < b->node_id ? -1 : 1;
-    }
-    return 0;
-}
-
-/* Canonicalize (determinism) — see cmp_fp_entry_by_qn. Avoid passing the
+    /* Canonicalize (determinism) — see cmp_fp_entry_by_qn. Avoid passing the
      * NULL empty-set buffer to qsort: libc treats zero elements as a no-op,
      * but the standard function contract still requires a valid base pointer. */
     if (count > 1) {

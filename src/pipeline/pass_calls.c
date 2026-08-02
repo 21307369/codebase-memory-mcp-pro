@@ -252,13 +252,20 @@ static int64_t create_svc_route_node(cbm_pipeline_ctx_t *ctx, const char *url, c
 
 static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const cbm_gbuf_node_t *source, const cbm_gbuf_node_t *target,
-                                 const cbm_resolution_t *res, cbm_svc_kind_t svc) {
+                                 const cbm_resolution_t *res, cbm_svc_kind_t svc,
+                                 bool suppress_plain_calls) {
     const char *url_or_topic = call->first_string_arg;
     bool is_url = (url_or_topic && url_or_topic[0] != '\0' &&
                    (url_or_topic[0] == '/' || strstr(url_or_topic, "://") != NULL));
     bool is_topic = (url_or_topic && url_or_topic[0] != '\0' && svc == CBM_SVC_ASYNC &&
                      strlen(url_or_topic) > PAIR_LEN);
     if (!is_url && !is_topic) {
+        /* No URL/topic -> this is not a real service call; the svc kind was a
+         * substring coincidence in the resolved QN. Emit a plain CALLS edge —
+         * unless a weak TS/JS member-call match should be suppressed (#592/#606). */
+        if (suppress_plain_calls) {
+            return;
+        }
         char esc_callee[CBM_SZ_256];
         cbm_json_escape(esc_callee, sizeof(esc_callee), call->callee_name);
         char props[CBM_SZ_512];
@@ -296,14 +303,15 @@ static void emit_http_async_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
 static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
                                  const cbm_gbuf_node_t *source, const cbm_gbuf_node_t *target,
                                  const cbm_resolution_t *res, const char *module_qn,
-                                 const char **imp_keys, const char **imp_vals, int imp_count) {
+                                 const char **imp_keys, const char **imp_vals, int imp_count,
+                                 bool suppress_plain_calls) {
     cbm_svc_kind_t svc = cbm_service_pattern_match(res->qualified_name);
     if (svc == CBM_SVC_ROUTE_REG && call->first_string_arg && call->first_string_arg[0] == '/') {
         handle_route_registration(ctx, call, source, module_qn, imp_keys, imp_vals, imp_count);
         return;
     }
     if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
-        emit_http_async_edge(ctx, call, source, target, res, svc);
+        emit_http_async_edge(ctx, call, source, target, res, svc, suppress_plain_calls);
         return;
     }
     if (svc == CBM_SVC_CONFIG) {
