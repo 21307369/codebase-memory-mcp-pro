@@ -39,6 +39,7 @@ enum {
 
 #define SLEN(s) (sizeof(s) - 1)
 #include "mcp/mcp.h"
+#include "mcp/compact_out.h"
 #include "store/store.h"
 #include <sqlite3.h>
 #include "cypher/cypher.h"
@@ -1705,6 +1706,27 @@ static int sg_parse_fields(const char *args, const char *out[], int max_out,
     return n;
 }
 
+/* Append a property as one compact-output cell. Compound values stay one
+ * column by using their compact JSON representation; the cell emitter quotes
+ * and escapes that representation as needed. */
+static void sg_toon_property_cell(cbm_sb_t *sb, yyjson_val *v) {
+    if (v && yyjson_is_str(v)) {
+        cbm_tree_cell_str(sb, yyjson_get_str(v), false);
+    } else if (v && yyjson_is_bool(v)) {
+        cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
+    } else if (v && yyjson_is_int(v)) {
+        cbm_tree_cell_int(sb, yyjson_get_int(v), false);
+    } else if (v && yyjson_is_real(v)) {
+        cbm_tree_cell_real(sb, yyjson_get_real(v), false);
+    } else if (v && !yyjson_is_null(v)) {
+        char *json = yyjson_val_write(v, 0, NULL);
+        cbm_tree_cell_str(sb, json ? json : "", false);
+        free(json);
+    } else {
+        cbm_tree_cell_str(sb, "", false);
+    }
+}
+
 /* Append one row's extra-field cells, pulled from the node's properties. */
 static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char *const *fields,
                                 int nfields) {
@@ -1713,17 +1735,7 @@ static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char
     yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
     for (int f = 0; f < nfields; f++) {
         yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-        if (v && yyjson_is_str(v)) {
-            cbm_toon_cell_str(sb, yyjson_get_str(v), false);
-        } else if (v && yyjson_is_bool(v)) {
-            cbm_toon_cell_bool(sb, yyjson_get_bool(v), false);
-        } else if (v && yyjson_is_int(v)) {
-            cbm_toon_cell_int(sb, yyjson_get_int(v), false);
-        } else if (v && yyjson_is_real(v)) {
-            cbm_toon_cell_real(sb, yyjson_get_real(v), false);
-        } else {
-            cbm_toon_cell_str(sb, "", false);
-        }
+        sg_toon_property_cell(sb, v);
     }
     if (pd) {
         yyjson_doc_free(pd);
@@ -1761,7 +1773,185 @@ static void emit_search_results_toon(cbm_sb_t *sb, const cbm_search_output_t *ou
         cbm_toon_cell_int(sb, sr->in_degree, false);
         cbm_toon_cell_int(sb, sr->out_degree, false);
         sg_toon_extra_cells(sb, sr->node.properties_json, fields, nfields);
-        cbm_toon_row_end(sb);
+        cbm_tree_row_end(sb);
+    }
+    cbm_tree_scalar_bool(sb, "has_more", out->total > offset + out->count);
+}
+
+/* ── Tree format (Phase-2 A/B candidate) ────────────────────────────
+ * Prefix-factored, file-grouped output: the shared (qn-prefix, file) pair is
+ * printed ONCE per group, rows beneath carry only the short name + data
+ * cells. The reconstruction rule (qn = group-prefix + "." + name) is stated
+ * once in the header so agents can copy exact join keys into follow-up
+ * calls. Research basis: HDT front-coding (prefix factoring), LocAgent tree
+ * ablation (tree > flat/DOT for LLM comprehension), Lost-in-Distance
+ * (related rows adjacent — grouping by module does exactly that). */
+
+/* qn-prefix = qualified_name minus its last '.'-segment. Returns length. */
+static size_t sg_qn_prefix_len(const char *qn) {
+    const char *last = qn ? strrchr(qn, '.') : NULL;
+    return last ? (size_t)(last - qn) : 0;
+}
+
+static int sg_cmp_by_qn(const void *pa, const void *pb) {
+    const cbm_search_result_t *a = (const cbm_search_result_t *)pa;
+    const cbm_search_result_t *b = (const cbm_search_result_t *)pb;
+    const char *qa = a->node.qualified_name ? a->node.qualified_name : "";
+    const char *qb = b->node.qualified_name ? b->node.qualified_name : "";
+    return strcmp(qa, qb);
+}
+
+static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int offset,
+                                     const char *const *fields, int nfields, cbm_store_t *store,
+                                     const char *relationship, bool include_connected) {
+    char buf[CBM_SZ_512];
+    char extra_cols[CBM_SZ_256] = "";
+    for (int f = 0; f < nfields; f++) {
+        strncat(extra_cols, " ", sizeof(extra_cols) - strlen(extra_cols) - 1);
+        strncat(extra_cols, fields[f], sizeof(extra_cols) - strlen(extra_cols) - 1);
+    }
+    if (include_connected) {
+        strncat(extra_cols, " connected", sizeof(extra_cols) - strlen(extra_cols) - 1);
+    }
+    snprintf(buf, sizeof(buf),
+             "total: %d\nresults: %d  (rows: name label lines in out%s; "
+             "qn = group prefix + \".\" + name)\n",
+             out->total, out->count, extra_cols);
+    cbm_sb_append(sb, buf);
+    /* Sort by qn so same-prefix rows are adjacent (module clustering). */
+    if (out->count > 1) {
+        qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
+    }
+    char cur_group[CBM_SZ_1K] = "";
+    for (int i = 0; i < out->count; i++) {
+        const cbm_search_result_t *sr = &out->results[i];
+        const char *qn = sr->node.qualified_name ? sr->node.qualified_name : "";
+        const char *file = sr->node.file_path ? sr->node.file_path : "";
+        size_t plen = sg_qn_prefix_len(qn);
+        char group[CBM_SZ_1K];
+        snprintf(group, sizeof(group), "%.*s (%s)", (int)plen, qn, file);
+        if (strcmp(group, cur_group) != 0) {
+            snprintf(cur_group, sizeof(cur_group), "%s", group);
+            cbm_sb_append(sb, group);
+            cbm_sb_append(sb, ":\n");
+        }
+        const char *shortname = plen ? qn + plen + 1 : qn;
+        char lines[CBM_SZ_32];
+        sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
+        char row[CBM_SZ_1K];
+        snprintf(row, sizeof(row), "  %s %s %s %d %d", shortname,
+                 sr->node.label ? sr->node.label : "", lines, sr->in_degree, sr->out_degree);
+        cbm_sb_append(sb, row);
+        /* Extra property columns (fields param). Routed through the shared
+         * cell emitters so values with spaces (signatures, docstrings) are
+         * QUOTED — a raw append would shift every following column. Missing
+         * values emit as "-" (the emitter's empty-cell placeholder). */
+        if (nfields > 0) {
+            yyjson_doc *pd =
+                (sr->node.properties_json && sr->node.properties_json[0])
+                    ? yyjson_read(sr->node.properties_json, strlen(sr->node.properties_json), 0)
+                    : NULL;
+            yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
+            for (int f = 0; f < nfields; f++) {
+                yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
+                sg_toon_property_cell(sb, v);
+            }
+            if (pd) {
+                yyjson_doc_free(pd);
+            }
+        }
+        if (include_connected && sr->node.id > 0) {
+            char joined[CBM_SZ_1K];
+            enrich_connected_joined(store, sr->node.id, relationship, joined, sizeof(joined));
+            cbm_tree_cell_str(sb, joined, false); /* empty emits "-" */
+        }
+        cbm_sb_append(sb, "\n");
+    }
+    snprintf(buf, sizeof(buf), "has_more: %s\n",
+             out->total > offset + out->count ? "true" : "false");
+    cbm_sb_append(sb, buf);
+}
+
+/* json-stringified tree: the SAME grouped model as the text tree, serialized
+ * as JSON for agents that need structured parsing — groups with a shared
+ * (qn_prefix, file) and column-ordered row ARRAYS (never per-row key
+ * envelopes; that legacy shape was 84% key overhead). */
+static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                          cbm_search_output_t *out, int offset,
+                                          const char *const *fields, int nfields,
+                                          cbm_store_t *store, const char *relationship,
+                                          bool include_connected) {
+    yyjson_mut_obj_add_int(doc, root, "total", out->total);
+    yyjson_mut_obj_add_int(doc, root, "count", out->count);
+    yyjson_mut_val *cols = yyjson_mut_arr(doc);
+    static const char *const col_names[] = {"name", "label", "lines", "in", "out"};
+    for (size_t i = 0; i < sizeof(col_names) / sizeof(col_names[0]); i++) {
+        yyjson_mut_arr_add_str(doc, cols, col_names[i]);
+    }
+    for (int f = 0; f < nfields; f++) {
+        yyjson_mut_arr_add_strcpy(doc, cols, fields[f]);
+    }
+    if (include_connected) {
+        yyjson_mut_arr_add_str(doc, cols, "connected");
+    }
+    yyjson_mut_obj_add_val(doc, root, "cols", cols);
+    if (out->count > 1) {
+        qsort(out->results, (size_t)out->count, sizeof(cbm_search_result_t), sg_cmp_by_qn);
+    }
+    yyjson_mut_val *groups = yyjson_mut_arr(doc);
+    yyjson_mut_val *cur = NULL;
+    yyjson_mut_val *cur_rows = NULL;
+    char cur_key[CBM_SZ_1K] = "";
+    for (int i = 0; i < out->count; i++) {
+        const cbm_search_result_t *sr = &out->results[i];
+        const char *qn = sr->node.qualified_name ? sr->node.qualified_name : "";
+        const char *file = sr->node.file_path ? sr->node.file_path : "";
+        size_t plen = sg_qn_prefix_len(qn);
+        char key[CBM_SZ_1K];
+        snprintf(key, sizeof(key), "%.*s|%s", (int)plen, qn, file);
+        if (!cur || strcmp(key, cur_key) != 0) {
+            snprintf(cur_key, sizeof(cur_key), "%s", key);
+            cur = yyjson_mut_obj(doc);
+            char prefix[CBM_SZ_1K];
+            snprintf(prefix, sizeof(prefix), "%.*s", (int)plen, qn);
+            yyjson_mut_obj_add_strcpy(doc, cur, "qn_prefix", prefix);
+            yyjson_mut_obj_add_strcpy(doc, cur, "file", file);
+            cur_rows = yyjson_mut_arr(doc);
+            yyjson_mut_obj_add_val(doc, cur, "rows", cur_rows);
+            yyjson_mut_arr_add_val(groups, cur);
+        }
+        char lines[CBM_SZ_32];
+        sg_lines_str(lines, sizeof(lines), sr->node.start_line, sr->node.end_line);
+        yyjson_mut_val *row = yyjson_mut_arr(doc);
+        yyjson_mut_arr_add_strcpy(doc, row, plen ? qn + plen + 1 : qn);
+        yyjson_mut_arr_add_strcpy(doc, row, sr->node.label ? sr->node.label : "");
+        yyjson_mut_arr_add_strcpy(doc, row, lines);
+        yyjson_mut_arr_add_int(doc, row, sr->in_degree);
+        yyjson_mut_arr_add_int(doc, row, sr->out_degree);
+        if (nfields > 0) {
+            yyjson_doc *pd =
+                (sr->node.properties_json && sr->node.properties_json[0])
+                    ? yyjson_read(sr->node.properties_json, strlen(sr->node.properties_json), 0)
+                    : NULL;
+            yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
+            for (int f = 0; f < nfields; f++) {
+                yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
+                yyjson_mut_val *copy =
+                    (v && !yyjson_is_null(v)) ? yyjson_val_mut_copy(doc, v) : NULL;
+                if (copy) {
+                    yyjson_mut_arr_add_val(row, copy);
+                } else {
+                    yyjson_mut_arr_add_null(doc, row);
+                }
+            }
+            if (pd) {
+                yyjson_doc_free(pd);
+            }
+        }
+        if (include_connected && sr->node.id > 0) {
+            yyjson_mut_arr_add_val(row, enrich_connected(doc, store, sr->node.id, relationship));
+        }
+        yyjson_mut_arr_add_val(cur_rows, row);
     }
     cbm_toon_scalar_bool(sb, "has_more", out->total > offset + out->count);
 }

@@ -352,3 +352,86 @@ int cbm_cmd_hook_augment(void) {
     free(input);
     return 0;
 }
+
+#define HA_BASH_TOK_MAX 32
+#define HA_BASH_TOK_SZ 256
+
+static int ha_tokenize(const char *cmd, char toks[][HA_BASH_TOK_SZ], int max) {
+    int n = 0;
+    const char *p = cmd;
+    while (*p && n < max) {
+        while (*p && isspace((unsigned char)*p))
+            p++;
+        if (!*p)
+            break;
+        char *d = toks[n];
+        int dlen = 0;
+        while (*p && !isspace((unsigned char)*p)) {
+            if (*p == '\'') {
+                for (p++; *p && *p != '\''; p++)
+                    if (dlen < HA_BASH_TOK_SZ - 1)
+                        d[dlen++] = *p;
+                if (*p == '\'')
+                    p++;
+            } else if (*p == '"') {
+                for (p++; *p && *p != '"'; p++) {
+                    if (*p == '\\' && p[1] && strchr("\\\"$`", p[1]))
+                        p++;
+                    if (dlen < HA_BASH_TOK_SZ - 1)
+                        d[dlen++] = *p;
+                }
+                if (*p == '"')
+                    p++;
+            } else if (*p == '\\' && p[1]) {
+                p++;
+                if (dlen < HA_BASH_TOK_SZ - 1)
+                    d[dlen++] = *p++;
+            } else {
+                if (dlen < HA_BASH_TOK_SZ - 1)
+                    d[dlen++] = *p++;
+            }
+        }
+        d[dlen] = '\0';
+        if (dlen > 0)
+            n++;
+    }
+    return n;
+}
+
+static bool ha_is_env_assign(const char *t) {
+    if (!t || !t[0])
+        return false;
+    if (!isalpha((unsigned char)t[0]) && t[0] != '_')
+        return false;
+    const char *p = t + 1;
+    while (isalnum((unsigned char)*p) || *p == '_')
+        p++;
+    return *p == '=';
+}
+
+typedef enum { HA_BIN_GREP, HA_BIN_RG, HA_BIN_AG, HA_BIN_ACK, HA_BIN_UGREP } ha_bin_t;
+
+static const char *ha_search_bin_val_flags(ha_bin_t bin, bool rtk_grep) {
+    switch (bin) {
+    case HA_BIN_RG:
+        return "ABCmtTgMP";
+    case HA_BIN_AG:
+        return "ABCmpG";
+    default:
+        return "ABCmdD";
+    }
+}
+
+static bool ha_parse_bash_search_pattern(const char *cmd, char *out, size_t out_sz) {
+    if (!cmd || !out || out_sz == 0)
+        return false;
+    char toks[HA_BASH_TOK_MAX][HA_BASH_TOK_SZ];
+    int n = ha_tokenize(cmd, toks, HA_BASH_TOK_MAX);
+    if (n == 0)
+        return false;
+
+    int i = 0;
+    while (i < n && ha_is_env_assign(toks[i]))
+bool cbm_hook_augment_parse_bash_pattern_for_testing(const char *cmd, char *out, size_t out_sz) {
+    return ha_parse_bash_search_pattern(cmd, out, out_sz);
+}

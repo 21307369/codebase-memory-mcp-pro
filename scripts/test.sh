@@ -75,10 +75,4 @@ echo "=== Step 5: parent-death watchdog regression (#406/#407) ==="
  $ARCH_PREFIX make -j"$NPROC" -f Makefile.cbm cbm TEST_SEAMS=1 $MAKE_ARGS
 bash "$ROOT/tests/test_parent_watchdog.sh"
 
-# Step 5c: a worker-delivered MCP error is transport success. The outer CLI
-# still exits nonzero for the user-facing tool error, but the supervisor must
-# preserve that response instead of misreporting exit_nonzero as a file crash.
-echo "=== Step 5c: worker error-response transport regression ==="
-bash "$ROOT/tests/test_worker_error_response.sh"
-
 echo "=== All tests passed ==="

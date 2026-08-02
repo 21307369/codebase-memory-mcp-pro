@@ -3504,6 +3504,8 @@ int cbm_cmd_install(int argc, char **argv) {
 #endif
 
     /* Step 3: Install/refresh all agent configs, pointing at the install target. */
+    char bin_target[CLI_BUF_1K];
+    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/codebase-memory-mcp", home);
     cbm_install_agent_configs(home, bin_target, force, dry_run, install_hooks);
 
     /* Step 4: Ensure PATH */

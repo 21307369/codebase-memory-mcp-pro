@@ -1194,3 +1194,62 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
 
     return CBM_LANG_MATLAB;
 }
+
+/* Case-insensitive prefix match (portable — no strncasecmp dependency). */
+static bool starts_with_ci(const char *s, const char *prefix) {
+    for (; *prefix; s++, prefix++) {
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* .cfc components may be script-dialect or tag-dialect ColdFusion: tag
+ * components start with <cfcomponent>/<cffunction> or a leading bare tag;
+ * script components start with a <cfscript> wrapper or plain script. */
+CBMLanguage cbm_disambiguate_cfc(const char *path) {
+    if (!path) {
+        return CBM_LANG_CFSCRIPT;
+    }
+
+    FILE *f = cbm_fopen(path, "r");
+    if (!f) {
+        return CBM_LANG_CFSCRIPT;
+    }
+
+    /* Read a generous head: tag components can carry a large license/revision
+     * comment block before the <cfcomponent> opener. */
+    char buf[CBM_SZ_16K + SKIP_ONE];
+    size_t n = fread(buf, SKIP_ONE, CBM_SZ_16K, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+
+    /* Rule 1: explicit tag-component markers ⇒ tag dialect. */
+    if (cbm_strcasestr(buf, "<cfcomponent") != NULL || cbm_strcasestr(buf, "<cffunction") != NULL) {
+        return CBM_LANG_CFML;
+    }
+
+    /* Rule 2: locate the first significant token, past whitespace and comments. */
+    const char *p = buf;
+    for (;;) {
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+        if (starts_with_ci(p, "<!---")) {
+            const char *end = strstr(p + SLEN("<!---"), "--->");
+            if (!end) {
+                break; /* comment runs past the buffer — treat as no token */
+            }
+            p = end + SLEN("--->");
+            continue;
+        }
+        break;
+    }
+    if (*p == '<') {
+        /* A leading <cfscript> wrapper is script content; any other leading tag
+         * (bare-tag file) is tag content. */
+        return starts_with_ci(p, "<cfscript") ? CBM_LANG_CFSCRIPT : CBM_LANG_CFML;
+    }
+    return CBM_LANG_CFSCRIPT;
+}
