@@ -169,8 +169,6 @@ void cbm_registry_resolve_cache_end(void);
 /* Check if a qualified name exists in the registry. */
 bool cbm_registry_exists(const cbm_registry_t *r, const char *qn);
 
-<<<<<<< ours
-=======
 /* True if `name` is one of the curated Perl core builtins (perlfunc). Used by
  * the call-resolution passes to suppress generic-resolver CALLS edges from Perl
  * builtin invocations (push/shift/keys/...) to project subs that merely share
@@ -193,7 +191,6 @@ bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *c
  * Pure; unit-tested in test_registry.c. */
 bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy);
 
->>>>>>> theirs
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 

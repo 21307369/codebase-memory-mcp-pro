@@ -1820,8 +1820,6 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
 
-<<<<<<< ours
-=======
         /* Perl call-graph noise guard (#476), mirroring the sequential pass
          * (pass_calls.c). Perl has no LSP resolver; for builtins (push/shift/
          * keys/...) and method calls ($obj->m, unresolved receiver), suppress
@@ -1876,7 +1874,6 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             }
         }
 
->>>>>>> theirs
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             if (cbm_service_pattern_route_method(call->callee_name) != NULL) {
                 cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
@@ -1906,12 +1903,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
         _rc_t0 = extract_now_ns();
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, module_qn,
-<<<<<<< ours
-                          rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
-=======
                           rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
                           drop_plain_call);
->>>>>>> theirs
         atomic_fetch_add_explicit(&rc->time_ns_rc_emit, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
         ws->calls_resolved++;

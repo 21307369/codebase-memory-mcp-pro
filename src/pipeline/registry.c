@@ -356,8 +356,6 @@ static cbm_resolution_t empty_result(void) {
     return r;
 }
 
-<<<<<<< ours
-=======
 /* ── Perl builtin guard (#459 follow-up: call-graph noise) ──────────
  * Curated subset of perlfunc core builtins. When a Perl CALL resolves
  * only by the generic short-name matcher (no LSP, no import, after the
@@ -453,7 +451,6 @@ bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *st
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
->>>>>>> theirs
 /* ── Lifecycle ──────────────────────────────────────────────────── */
 
 cbm_registry_t *cbm_registry_new(void) {

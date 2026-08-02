@@ -978,8 +978,6 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
     PASS();
 }
 
-<<<<<<< ours
-=======
 /* TS/JS receiver-aware weak-strategy suppression (#592/#606 direction; Perl
  * precedent #477). A member call x.foo() whose receiver TYPE the TS-LSP cannot
  * resolve (a regex literal `re.test()`) must NOT be bound to a same-named
@@ -1489,7 +1487,6 @@ TEST(pipeline_local_fetch_shadow_not_classified_as_http) {
     PASS();
 }
 
->>>>>>> theirs
 /* ── Git history pass tests ─────────────────────────────────────── */
 
 TEST(githistory_is_trackable) {
@@ -7017,8 +7014,6 @@ SUITE(pipeline) {
     /* Calls pass */
     RUN_TEST(pipeline_calls_resolution);
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
-<<<<<<< ours
-=======
     RUN_TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges);
@@ -7026,7 +7021,6 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_native_fetch_classified_as_http_calls);
     RUN_TEST(pipeline_native_fetch_parallel_classified_as_http_calls);
     RUN_TEST(pipeline_local_fetch_shadow_not_classified_as_http);
->>>>>>> theirs
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);

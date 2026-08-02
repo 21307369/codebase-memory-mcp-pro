@@ -366,8 +366,6 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         return 0;
     }
-<<<<<<< ours
-=======
 
     /* Perl call-graph noise guard (#476). Perl has no LSP resolver, so the
      * generic registry chain is the only resolver; for builtins (push/shift/
@@ -418,17 +416,12 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
         }
     }
 
->>>>>>> theirs
     const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
     if (!target_node || source_node->id == target_node->id) {
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
-<<<<<<< ours
-                         imp_count);
-=======
                          imp_count, drop_plain_call);
->>>>>>> theirs
     return SKIP_ONE;
 }
 

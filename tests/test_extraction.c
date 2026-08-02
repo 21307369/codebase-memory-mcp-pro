@@ -3323,7 +3323,6 @@ TEST(complexity_access_depth_and_params) {
     PASS();
 }
 
-<<<<<<< ours
 /* M2-c: Swift enum cases are extracted as distinct "EnumCase" nodes (previously
  * dropped entirely — enum_entry was not a recognized member kind). A multi-name
  * line (`case east, west`) must split into one EnumCase per case identifier. */
@@ -3331,7 +3330,7 @@ TEST(swift_enum_cases_extracted_as_enumcase) {
     CBMFileResult *r = extract("enum Direction {\n"
                                "    case north\n"
                                "    case east, west\n"
-=======
+
 /* ═══════════════════════════════════════════════════════════════════
  * Perl call-graph noise (#459 follow-up)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -3541,7 +3540,6 @@ TEST(extract_ts_this_super_receiver_not_flagged) {
     CBMFileResult *r = extract("class A extends B {\n"
                                "  m() { this.helper(); super.render(); return new A(); }\n"
                                "  helper() {}\n"
->>>>>>> theirs
                                "}\n",
                                CBM_LANG_SWIFT, "t", "Enum.swift");
     ASSERT_NOT_NULL(r);
@@ -4643,8 +4641,6 @@ SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
 
-<<<<<<< ours
-=======
     /* Wide-flat-file linearity (ms-typescript hang) */
     RUN_TEST(extract_wide_flat_file_is_linear);
 
@@ -4692,7 +4688,6 @@ SUITE(extraction) {
     RUN_TEST(iris_export_xml_calls_extracted);
     RUN_TEST(iris_export_xml_multi_class);
 
->>>>>>> theirs
     /* R box-module imports + member calls */
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);

@@ -718,8 +718,6 @@ TEST(fuzzy_no_import_map_passthrough) {
     PASS();
 }
 
-<<<<<<< ours
-=======
 /* ── Perl builtin guard (#459 follow-up: call-graph noise) ───────── */
 
 TEST(perl_builtin_set_recognizes_core_builtins) {
@@ -817,7 +815,6 @@ TEST(dynamic_suppress_keeps_high_confidence_and_non_methods) {
     PASS();
 }
 
->>>>>>> theirs
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 /* Method call THROUGH an imported symbol that is itself an indexed node
@@ -969,8 +966,6 @@ SUITE(registry) {
     RUN_TEST(fuzzy_resolve_confidence_distance);
     RUN_TEST(fuzzy_penalty_unreachable_import);
     RUN_TEST(fuzzy_no_import_map_passthrough);
-<<<<<<< ours
-=======
 
     /* Perl builtin guard */
     RUN_TEST(perl_builtin_set_recognizes_core_builtins);
@@ -979,5 +974,4 @@ SUITE(registry) {
     RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
->>>>>>> theirs
 }
