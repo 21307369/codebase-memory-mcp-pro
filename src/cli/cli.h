@@ -9,6 +9,7 @@
 #ifndef CBM_CLI_H
 #define CBM_CLI_H
 
+#include <stddef.h>
 #include <stdbool.h>
 
 /* ── Version ──────────────────────────────────────────────────── */

@@ -593,6 +593,7 @@ void cbm_extract_imports(CBMExtractCtx *ctx);
 void cbm_extract_usages(CBMExtractCtx *ctx);
 void cbm_extract_semantic(CBMExtractCtx *ctx);
 void cbm_extract_type_refs(CBMExtractCtx *ctx);
+void cbm_extract_embedded_defs(CBMExtractCtx *ctx); // defs inside <cfscript> blocks of CFML tag files (PR #1412)
 void cbm_extract_env_accesses(CBMExtractCtx *ctx);
 void cbm_extract_type_assigns(CBMExtractCtx *ctx);
 void cbm_extract_channels(CBMExtractCtx *ctx);

@@ -2699,7 +2699,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, qn_safe_segment(a, name));
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
