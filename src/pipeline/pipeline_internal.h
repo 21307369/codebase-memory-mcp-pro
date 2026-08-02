@@ -25,6 +25,24 @@
 /* Route node QN buffer size (must fit __route__METHOD__/full/url/path) */
 #define CBM_ROUTE_QN_SIZE 768
 
+/* Stable internal serialization used by Project metadata and route
+ * diagnostics. */
+const char *cbm_pipeline_mode_name(cbm_index_mode_t mode);
+
+/* True when a graph node is a structural directory container (Folder/Project)
+ * rather than a code node. In a directory-based-module language (Java/Go, see
+ * cbm_lang_module_is_dir) a file's module QN equals its directory QN, so an
+ * enclosing-scope lookup for a CLASS-LEVEL usage/call (enclosing_func_qn ==
+ * module_qn) resolves to the ONE Folder/Project node shared by every file in
+ * that package. Sourcing an edge there conflates all same-package files into a
+ * single source node with an arbitrary file_path (#787). Source-node finders
+ * must treat such a hit as a miss and fall back to the per-file File node. */
+static inline bool cbm_pipeline_node_is_dir_container(const cbm_gbuf_node_t *node) {
+    return node && node->label &&
+           (strcmp(node->label, "Folder") == 0 || strcmp(node->label, "Project") == 0);
+}
+
+>>>>>>> theirs
 /* Time unit conversions */
 #define CBM_NS_PER_SEC 1000000000LL
 #define CBM_US_PER_SEC 1000000LL
@@ -530,9 +548,12 @@ int cbm_scan_project_env_urls(const char *root_path, cbm_env_binding_t *out, int
 
 /* Run incremental re-index on an existing disk DB.
  * Classifies files by mtime+size, deletes changed nodes, re-parses changed
- * files, merges into disk DB. Returns 0 on success. */
+ * files with effective_mode capabilities, then merges into disk DB. The
+ * pipeline's requested mode still owns discovery/exclusions. Returns 0 on
+ * success, or CBM_PIPELINE_ABORT_PRESERVE_DB when the existing coverage
+ * table is unreadable and the on-disk DB must be left untouched. */
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
-                                 int file_count);
+                                 int file_count, cbm_index_mode_t effective_mode);
 
 /* Pipeline accessors for incremental use */
 const char *cbm_pipeline_repo_path(const cbm_pipeline_t *p);

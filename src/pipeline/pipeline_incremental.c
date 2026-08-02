@@ -625,6 +625,7 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
                      itoa_buf((int)elapsed_ms(t)));
     }
 }
+
 /* Delete old DB and dump merged graph + hashes to disk.
  * Mode-skipped hash rows are preserved across the rebuild so subsequent
  * reindexes can correctly distinguish "never indexed" from "indexed but
@@ -717,11 +718,12 @@ static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *p
 /* ── Incremental pipeline entry point ────────────────────────────── */
 
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
-                                 int file_count) {
+                                 int file_count, cbm_index_mode_t effective_mode) {
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
 
     const char *project = cbm_pipeline_project_name(p);
+    cbm_index_mode_t requested_mode = (cbm_index_mode_t)cbm_pipeline_get_mode(p);
 
     /* Open existing disk DB */
     cbm_store_t *store = cbm_store_open_path(db_path);
@@ -864,7 +866,12 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         .gbuf = existing,
         .registry = registry,
         .cancelled = cbm_pipeline_cancelled_ptr(p),
+<<<<<<< ours
         .mode = cbm_pipeline_get_mode(p),
+=======
+        .pipeline = p, /* so passes can record per-file skips (Track B) */
+        .mode = effective_mode,
+>>>>>>> theirs
         .path_aliases = path_aliases,
     };
 
@@ -877,10 +884,90 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         }
     }
 
+    /* Discovery already used requested_mode. Re-extraction must preserve the
+     * stronger capabilities recorded in Project.index_mode, including full-only
+     * C/C++ Macro nodes. Restore the process-wide gate immediately afterwards. */
+    cbm_set_macro_extraction(effective_mode == CBM_MODE_FULL);
     run_extract_resolve(&ctx, changed_files, ci);
+    cbm_set_macro_extraction(requested_mode == CBM_MODE_FULL);
     cbm_pipeline_pass_k8s(&ctx, changed_files, ci);
     run_postpasses(&ctx, changed_files, ci, project);
 
+<<<<<<< ours
+=======
+    /* Free ObjectScript tables built by pass_calls during run_extract_resolve. */
+    if (ctx.return_type_table) {
+        for (int i = 0; i < ctx.return_type_table->count; i++) {
+            free((void *)ctx.return_type_table->entries[i].return_type);
+        }
+        free((void *)ctx.return_type_table);
+        ctx.return_type_table = NULL;
+    }
+    if (ctx.macro_table) {
+        free((void *)ctx.macro_table);
+        ctx.macro_table = NULL;
+    }
+
+    /* Coverage rows (#963): merge = previous FAILURE rows for files NOT
+     * re-extracted this run + this run's fresh entries (changed files replace
+     * their old rows — a file that parses cleanly now simply contributes
+     * nothing, so its stale flag dies here). By-design not_indexed_* rows are
+     * NOT carried over: discovery runs completely on every route, so this
+     * run's excluded dirs + ignored files are the fresh, authoritative set.
+     * Rows for deleted files are pruned against file_hashes inside the
+     * replace. Borrowed strings: old_cov and the pipeline own them past the
+     * dump_and_persist call below. */
+    int cov_n = 0;
+    cbm_file_error_t *run_errs = NULL;
+    int run_err_count = 0;
+    cbm_pipeline_get_file_errors(p, &run_errs, &run_err_count);
+    char **run_excluded = NULL;
+    int run_excluded_count = 0;
+    cbm_pipeline_get_excluded(p, &run_excluded, &run_excluded_count);
+    cbm_ignored_file_t *run_ignored = NULL;
+    int run_ignored_count = 0;
+    int run_ignored_total = 0;
+    cbm_pipeline_get_ignored(p, &run_ignored, &run_ignored_count, &run_ignored_total);
+    cbm_coverage_row_t *cov = NULL;
+    int cov_cap = old_cov_count + run_err_count + run_excluded_count + run_ignored_count;
+    if (cov_cap > 0) {
+        cov = (cbm_coverage_row_t *)malloc((size_t)cov_cap * sizeof(*cov));
+    }
+    bool coverage_rows_available = cov_cap == 0 || cov != NULL;
+    if (cov) {
+        CBMHashTable *changed_set = cbm_ht_create(ci > 0 ? (size_t)ci * PAIR_LEN : CBM_SZ_64);
+        for (int i = 0; i < ci; i++) {
+            cbm_ht_set(changed_set, changed_files[i].rel_path, &changed_files[i]);
+        }
+        for (int i = 0; i < old_cov_count; i++) {
+            bool by_design = old_cov[i].kind && strncmp(old_cov[i].kind, "not_indexed", 11) == 0;
+            if (!by_design && old_cov[i].rel_path &&
+                !cbm_ht_get(changed_set, old_cov[i].rel_path)) {
+                cov[cov_n++] = old_cov[i];
+            }
+        }
+        cbm_ht_free(changed_set);
+        for (int i = 0; i < run_err_count; i++) {
+            cov[cov_n].rel_path = run_errs[i].path;
+            cov[cov_n].kind = run_errs[i].phase;
+            cov[cov_n].detail = run_errs[i].reason;
+            cov_n++;
+        }
+        for (int i = 0; i < run_excluded_count; i++) {
+            cov[cov_n].rel_path = run_excluded[i];
+            cov[cov_n].kind = "not_indexed_dir";
+            cov[cov_n].detail = "excluded subtree";
+            cov_n++;
+        }
+        for (int i = 0; i < run_ignored_count; i++) {
+            cov[cov_n].rel_path = run_ignored[i].rel_path;
+            cov[cov_n].kind = "not_indexed_file";
+            cov[cov_n].detail = run_ignored[i].reason;
+            cov_n++;
+        }
+    }
+
+>>>>>>> theirs
     free(changed_files);
     cbm_registry_free(registry);
     cbm_path_alias_collection_free(path_aliases);
@@ -897,13 +984,44 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 
     /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
      * reindex can correctly classify those files instead of seeing them
+<<<<<<< ours
     int dp_rc =
         dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
                          mode_skipped_count, cbm_pipeline_repo_path(p),
                          cbm_pipeline_persistence(p));
+=======
+     * as never-existed). Artifact refresh happens only after publication. */
+    /* Record committed counts before dump_and_persist (whose dump frees the
+     * gbuf node index, zeroing the count) so the #334 plausibility gate also
+     * covers incremental reindexes, not just full ones. */
+    cbm_pipeline_set_committed_counts(p, cbm_gbuf_node_count(existing),
+                                      cbm_gbuf_edge_count(existing));
+    cbm_coverage_meta_t coverage_meta = {
+        .index_mode = cbm_pipeline_mode_name((cbm_index_mode_t)cbm_pipeline_get_mode(p)),
+        .recording_status =
+            !coverage_rows_available
+                ? "unavailable"
+                : (run_ignored_total > run_ignored_count ? "truncated" : "complete"),
+        .ignored_files_stored = run_ignored_count,
+        .ignored_files_total = run_ignored_total,
+        .coverage_version = 1,
+    };
+    int persist_rc = dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
+                                      mode_skipped_count, cov, cov_n, &coverage_meta);
+    free(cov);
+    cbm_store_free_coverage(old_cov, old_cov_count);
+>>>>>>> theirs
     free_mode_skipped(mode_skipped, mode_skipped_count);
     cbm_gbuf_free(existing);
 
+    if (persist_rc != 0) {
+        return persist_rc;
+    }
+
     cbm_log_info("incremental.done", "elapsed_ms", itoa_buf((int)elapsed_ms(t0)));
+<<<<<<< ours
     return dp_rc;
+=======
+    return 0;
+>>>>>>> theirs
 }
