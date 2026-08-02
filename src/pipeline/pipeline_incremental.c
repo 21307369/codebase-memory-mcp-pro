@@ -709,10 +709,6 @@ static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *p
 
     free(saved_adr);
     return format_stamped ? 0 : CBM_NOT_FOUND;
-}>>>>>>> theirs
-
-    free(saved_adr);
-    return format_stamped ? 0 : CBM_NOT_FOUND;
 }
 
 /* ── Incremental pipeline entry point ────────────────────────────── */
