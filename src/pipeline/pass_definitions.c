@@ -310,7 +310,8 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
         /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
         strcmp(def->label, "EnumCase") == 0 ||
-        strcmp(def->label, "Table") == 0 || strcmp(def->label, "View") == 0)) {
+        strcmp(def->label, "Table") == 0 || strcmp(def->label, "View") == 0 ||
+        strcmp(def->label, "Model") == 0)) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
