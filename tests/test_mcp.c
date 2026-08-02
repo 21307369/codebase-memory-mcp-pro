@@ -7,11 +7,117 @@
 #include "../src/foundation/compat_fs.h" /* cbm_unlink / cbm_rmdir */
 #include "test_framework.h"
 #include <mcp/mcp.h>
+#include <pipeline/pipeline.h>
+#include <semantic/semantic.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
 #include <string.h>
-#include <stdlib.h>
-#include <stdbool.h>
+#include <sys/stat.h> /* chmod / stat for read-only query reproductions */
+#ifdef _WIN32
+#include <direct.h>
+#define cbm_chdir _chdir
+#define cbm_getcwd _getcwd
+#else
+#include <sys/wait.h> /* waitpid — #845 fork+alarm harness */
+#include <unistd.h>
+#define cbm_chdir chdir
+#define cbm_getcwd getcwd
+#endif
+
+static bool mcp_response_has_exact_tool(const char *response, const char *expected_name) {
+    yyjson_doc *doc = response ? yyjson_read(response, strlen(response), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *result = root ? yyjson_obj_get(root, "result") : NULL;
+    yyjson_val *tools = result ? yyjson_obj_get(result, "tools") : NULL;
+    bool found = false;
+    if (tools && yyjson_is_arr(tools)) {
+        size_t index, max;
+        yyjson_val *tool;
+        yyjson_arr_foreach(tools, index, max, tool) {
+            yyjson_val *name = yyjson_obj_get(tool, "name");
+            if (name && yyjson_is_str(name) && strcmp(yyjson_get_str(name), expected_name) == 0) {
+                found = true;
+                break;
+            }
+        }
+    }
+    yyjson_doc_free(doc);
+    return found;
+}
+
+static size_t mcp_response_tool_count(const char *response) {
+    yyjson_doc *doc = response ? yyjson_read(response, strlen(response), 0) : NULL;
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *result = root ? yyjson_obj_get(root, "result") : NULL;
+    yyjson_val *tools = result ? yyjson_obj_get(result, "tools") : NULL;
+    size_t count = tools && yyjson_is_arr(tools) ? yyjson_arr_size(tools) : 0U;
+    yyjson_doc_free(doc);
+    return count;
+}
+
+static char mcp_log_buf[4096];
+static bool mcp_saw_autoindex_log;
+
+static void mcp_capture_log(const char *line) {
+    snprintf(mcp_log_buf, sizeof(mcp_log_buf), "%s", line ? line : "");
+    if (line && strstr(line, "msg=autoindex.")) {
+        mcp_saw_autoindex_log = true;
+    }
+}
+
+static int semantic915_fetch_limit = -1;
+
+static void semantic915_capture_vector_log(const char *line) {
+    if (!line || !strstr(line, "msg=vector_search.exec")) {
+        return;
+    }
+    const char *value = strstr(line, "fetch_limit=");
+    if (value) {
+        semantic915_fetch_limit = atoi(value + strlen("fetch_limit="));
+    }
+}
+
+static bool response_contains_json_fragment(const char *response, const char *fragment) {
+    if (!response || !fragment) {
+        return false;
+    }
+    if (strstr(response, fragment)) {
+        return true;
+    }
+
+    char escaped[512];
+    size_t out = 0;
+    for (size_t i = 0; fragment[i] && out + 2 < sizeof(escaped); i++) {
+        if (fragment[i] == '"') {
+            escaped[out++] = '\\';
+        }
+        escaped[out++] = fragment[i];
+    }
+    escaped[out] = '\0';
+    return strstr(response, escaped) != NULL;
+}
+
+static void restore_cache_dir(const char *saved_copy) {
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+}
+
+static void cleanup_project_db(const char *cache, const char *project) {
+    if (!cache || !project) {
+        return;
+    }
+
+    char path[CBM_SZ_4K];
+    snprintf(path, sizeof(path), "%s/%s.db", cache, project);
+    cbm_unlink(path);
+    snprintf(path, sizeof(path), "%s/%s.db-wal", cache, project);
+    cbm_unlink(path);
+    snprintf(path, sizeof(path), "%s/%s.db-shm", cache, project);
+    cbm_unlink(path);
+}
 
 /* ══════════════════════════════════════════════════════════════════
  *  JSON-RPC PARSING
@@ -493,6 +599,383 @@ TEST(tool_search_graph_includes_node_properties) {
 
     cbm_mcp_server_free(srv);
     cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_search_graph_query_honors_file_pattern_issue552) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+
+    const char *proj = "issue-552";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/issue-552");
+
+    cbm_node_t lib_status = {0};
+    lib_status.project = proj;
+    lib_status.label = "Function";
+    lib_status.name = "status";
+    lib_status.qualified_name = "issue-552.src.lib.status";
+    lib_status.file_path = "src/lib/status.c";
+    lib_status.start_line = 1;
+    lib_status.end_line = 3;
+    ASSERT_GT(cbm_store_upsert_node(st, &lib_status), 0);
+
+    cbm_node_t component_status = {0};
+    component_status.project = proj;
+    component_status.label = "Function";
+    component_status.name = "status";
+    component_status.qualified_name = "issue-552.src.components.status";
+    component_status.file_path = "src/components/status.c";
+    component_status.start_line = 1;
+    component_status.end_line = 3;
+    ASSERT_GT(cbm_store_upsert_node(st, &component_status), 0);
+
+    cbm_store_exec(st, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
+    ASSERT_EQ(cbm_store_exec(st,
+                             "INSERT INTO nodes_fts(rowid, name, qualified_name, label, "
+                             "file_path) "
+                             "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
+                             "FROM nodes;"),
+              CBM_STORE_OK);
+
+    char *resp =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":552,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"search_graph\","
+                                   "\"arguments\":{\"project\":\"issue-552\",\"query\":\"status\","
+                                   "\"file_pattern\":\"src/lib/*\",\"limit\":10}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_NOT_NULL(strstr(inner, "search_mode: bm25"));
+    ASSERT_NOT_NULL(strstr(inner, "src/lib/status.c"));
+    ASSERT_NULL(strstr(inner, "src/components/status.c"));
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+static int semantic915_insert_node_vector(sqlite3 *db, int64_t node_id, const char *project,
+                                          const int8_t vector[CBM_SEM_DIM]) {
+    const char *sql = "INSERT INTO node_vectors(node_id, project, vector) VALUES (?1, ?2, ?3)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    sqlite3_bind_int64(stmt, 1, node_id);
+    sqlite3_bind_text(stmt, 2, project, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 3, vector, CBM_SEM_DIM, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+static int semantic915_insert_token_vector(sqlite3 *db, const char *project, const char *token,
+                                           const int8_t vector[CBM_SEM_DIM]) {
+    const char *sql =
+        "INSERT INTO token_vectors(project, token, vector, idf) VALUES (?1, ?2, ?3, ?4)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return SQLITE_ERROR;
+    }
+    sqlite3_bind_text(stmt, 1, project, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, token, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(stmt, 3, vector, CBM_SEM_DIM, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, 1);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+TEST(tool_search_graph_semantic_only_uses_vector_results_issue915) {
+    char cache[256];
+    snprintf(cache, sizeof(cache), "/tmp/cbm-sem915-cache-XXXXXX");
+    if (!cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp cache failed");
+    }
+
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    const char *project = "issue-915-semantic";
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/%s.db", cache, project);
+
+    cbm_store_t *st = cbm_store_open_path(db_path);
+    bool setup_ok = st != NULL;
+    if (setup_ok &&
+        cbm_store_upsert_project(st, project, "/tmp/issue-915-semantic") != CBM_STORE_OK) {
+        setup_ok = false;
+    }
+
+    cbm_node_t registry = {.project = project,
+                           .label = "Function",
+                           .name = "AAARegistryKey",
+                           .qualified_name = "issue915.registry.AAARegistryKey",
+                           .file_path = "registry.c",
+                           .start_line = 1,
+                           .end_line = 3};
+    if (setup_ok && cbm_store_upsert_node(st, &registry) <= 0) {
+        setup_ok = false;
+    }
+
+    cbm_node_t debt = {.project = project,
+                       .label = "Function",
+                       .name = "DebtCalculator",
+                       .qualified_name = "issue915.finance.DebtCalculator",
+                       .file_path = "debt.c",
+                       .start_line = 10,
+                       .end_line = 20};
+    cbm_node_t resolver = {.project = project,
+                           .label = "Function",
+                           .name = "DebtResolver",
+                           .qualified_name = "issue915.finance.DebtResolver",
+                           .file_path = "resolver.c",
+                           .start_line = 30,
+                           .end_line = 40};
+    int64_t debt_id = setup_ok ? cbm_store_upsert_node(st, &debt) : 0;
+    int64_t resolver_id = setup_ok ? cbm_store_upsert_node(st, &resolver) : 0;
+    setup_ok = setup_ok && debt_id > 0 && resolver_id > debt_id;
+
+    if (setup_ok) {
+        setup_ok =
+            cbm_store_exec(st, "CREATE TABLE node_vectors (node_id INTEGER PRIMARY KEY, "
+                               "project TEXT NOT NULL, vector BLOB NOT NULL)") == CBM_STORE_OK;
+    }
+    if (setup_ok) {
+        setup_ok =
+            cbm_store_exec(st, "CREATE TABLE token_vectors (id INTEGER PRIMARY KEY, "
+                               "project TEXT NOT NULL, token TEXT NOT NULL, "
+                               "vector BLOB NOT NULL, idf INTEGER NOT NULL)") == CBM_STORE_OK;
+    }
+
+    int8_t debt_vec[CBM_SEM_DIM] = {0};
+    debt_vec[0] = 127;
+    if (setup_ok) {
+        setup_ok = semantic915_insert_token_vector(cbm_store_get_db(st), project, "debt",
+                                                   debt_vec) == SQLITE_OK;
+    }
+    if (setup_ok) {
+        setup_ok = semantic915_insert_node_vector(cbm_store_get_db(st), debt_id, project,
+                                                  debt_vec) == SQLITE_OK;
+    }
+    if (setup_ok) {
+        setup_ok = semantic915_insert_node_vector(cbm_store_get_db(st), resolver_id, project,
+                                                  debt_vec) == SQLITE_OK;
+    }
+
+    /* More candidates than the hard window, all below the query threshold. */
+    int8_t tail_vec[CBM_SEM_DIM] = {0};
+    tail_vec[0] = 1;
+    tail_vec[1] = 127;
+    for (int i = 0; setup_ok && i < 260; i++) {
+        char name[32];
+        char qn[64];
+        char file[32];
+        snprintf(name, sizeof(name), "NearZeroTail%03d", i);
+        snprintf(qn, sizeof(qn), "issue915.tail.%s", name);
+        snprintf(file, sizeof(file), "tail_%03d.c", i);
+        cbm_node_t tail = {.project = project,
+                           .label = "Function",
+                           .name = name,
+                           .qualified_name = qn,
+                           .file_path = file,
+                           .start_line = i + 1,
+                           .end_line = i + 1};
+        int64_t tail_id = cbm_store_upsert_node(st, &tail);
+        setup_ok = tail_id > 0 && semantic915_insert_node_vector(cbm_store_get_db(st), tail_id,
+                                                                 project, tail_vec) == SQLITE_OK;
+    }
+    if (st) {
+        (void)cbm_store_checkpoint(st);
+        cbm_store_close(st);
+    }
+    if (!setup_ok) {
+        cleanup_project_db(cache, project);
+        restore_cache_dir(saved_copy);
+        free(saved_copy);
+        cbm_rmdir(cache);
+        FAIL("semantic fixture setup failed");
+    }
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    CBMLogLevel previous_log_level = cbm_log_get_level();
+    semantic915_fetch_limit = -1;
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_sink_ex(semantic915_capture_vector_log, CBM_LOG_SINK_REPLACE);
+    char *resp =
+        cbm_mcp_handle_tool(srv, "search_graph",
+                            "{\"project\":\"issue-915-semantic\",\"semantic_query\":[\"debt\"],"
+                            "\"format\":\"json\",\"limit\":1,\"offset\":0}");
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(previous_log_level);
+    int primary_fetch_limit = semantic915_fetch_limit;
+
+    char *inner = extract_text_content(resp);
+    bool first_page_ok =
+        inner && response_contains_json_fragment(inner, "\"search_mode\":\"semantic\"") &&
+        response_contains_json_fragment(inner, "\"total\":2") &&
+        response_contains_json_fragment(inner, "\"has_more\":true") &&
+        response_contains_json_fragment(inner, "\"name\":\"DebtCalculator\"") &&
+        strstr(inner, "DebtResolver") == NULL && strstr(inner, "NearZeroTail") == NULL &&
+        strstr(inner, "AAARegistryKey") == NULL && strstr(inner, "semantic_results") == NULL;
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"semantic_query\":[\"debt\"],"
+                               "\"format\":\"json\",\"limit\":1,\"offset\":1}");
+    inner = extract_text_content(resp);
+    bool second_page_ok = inner && response_contains_json_fragment(inner, "\"total\":2") &&
+                          response_contains_json_fragment(inner, "\"has_more\":false") &&
+                          response_contains_json_fragment(inner, "\"name\":\"DebtResolver\"") &&
+                          strstr(inner, "DebtCalculator") == NULL;
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"semantic_query\":[\"debt\"],"
+                               "\"format\":\"json\",\"limit\":1,\"offset\":2}");
+    inner = extract_text_content(resp);
+    bool exhausted_page_ok = inner && response_contains_json_fragment(inner, "\"total\":2") &&
+                             response_contains_json_fragment(inner, "\"results\":[]") &&
+                             response_contains_json_fragment(inner, "\"has_more\":false");
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"semantic_query\":[\"debt\"],"
+                               "\"limit\":1,\"offset\":1}");
+    inner = extract_text_content(resp);
+    bool toon_page_ok = inner && strstr(inner, "search_mode: semantic") &&
+                        strstr(inner, "total: 2") && strstr(inner, "semantic[1]") &&
+                        strstr(inner, "DebtResolver") && strstr(inner, "has_more: false") &&
+                        strstr(inner, "results[") == NULL && strstr(inner, "NearZeroTail") == NULL;
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"label\":\"\","
+                               "\"semantic_query\":[\"debt\"],\"format\":\"json\",\"limit\":1}");
+    inner = extract_text_content(resp);
+    bool empty_label_omitted_ok =
+        inner && response_contains_json_fragment(inner, "\"search_mode\":\"semantic\"") &&
+        response_contains_json_fragment(inner, "\"total\":2") &&
+        response_contains_json_fragment(inner, "\"name\":\"DebtCalculator\"") &&
+        strstr(inner, "semantic_results") == NULL && strstr(inner, "AAARegistryKey") == NULL;
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"label\":\"\","
+                               "\"semantic_query\":[\"debt\"],\"limit\":1}");
+    inner = extract_text_content(resp);
+    bool empty_label_toon_ok = inner && strstr(inner, "search_mode: semantic") &&
+                               strstr(inner, "total: 2") && strstr(inner, "semantic[1]") &&
+                               strstr(inner, "DebtCalculator") && strstr(inner, "results[") == NULL;
+    free(inner);
+    free(resp);
+
+    semantic915_fetch_limit = -1;
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_sink_ex(semantic915_capture_vector_log, CBM_LOG_SINK_REPLACE);
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"label\":\"Function\","
+                               "\"semantic_query\":[\"debt\"],\"format\":\"json\",\"limit\":60}");
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(previous_log_level);
+    int combined_fetch_limit = semantic915_fetch_limit;
+    inner = extract_text_content(resp);
+    yyjson_doc *combined_doc = inner ? yyjson_read(inner, strlen(inner), 0) : NULL;
+    yyjson_val *combined_root = combined_doc ? yyjson_doc_get_root(combined_doc) : NULL;
+    yyjson_val *semantic_results =
+        combined_root ? yyjson_obj_get(combined_root, "semantic_results") : NULL;
+    bool combined_has_tail = false;
+    size_t combined_idx = 0;
+    size_t combined_max = 0;
+    yyjson_val *combined_item;
+    yyjson_arr_foreach(semantic_results, combined_idx, combined_max, combined_item) {
+        const char *name = yyjson_get_str(yyjson_obj_get(combined_item, "name"));
+        if (name && strncmp(name, "NearZeroTail", strlen("NearZeroTail")) == 0) {
+            combined_has_tail = true;
+        }
+    }
+    bool combined_ok = semantic_results && yyjson_is_arr(semantic_results) &&
+                       yyjson_arr_size(semantic_results) == 60 && combined_has_tail;
+    if (combined_doc) {
+        yyjson_doc_free(combined_doc);
+    }
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(srv, "search_graph",
+                               "{\"project\":\"issue-915-semantic\",\"semantic_query\":[\"debt\"],"
+                               "\"format\":\"json\",\"limit\":1,\"offset\":2147483647}");
+    inner = extract_text_content(resp);
+    bool large_offset_ok = inner && response_contains_json_fragment(inner, "\"results\":[]") &&
+                           response_contains_json_fragment(inner, "\"has_more\":false");
+    free(inner);
+    free(resp);
+
+    resp = cbm_mcp_handle_tool(
+        srv, "search_graph",
+        "{\"project\":\"issue-915-semantic\",\"semantic_query\":\"debt\",\"limit\":6}");
+    bool type_error_unchanged =
+        resp && strstr(resp, "semantic_query must be an array of keyword strings") != NULL;
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    cleanup_project_db(cache, project);
+    restore_cache_dir(saved_copy);
+    free(saved_copy);
+    cbm_rmdir(cache);
+
+    ASSERT_EQ(primary_fetch_limit, CBM_VECTOR_SEARCH_CANDIDATE_CAP);
+    ASSERT_EQ(combined_fetch_limit, 300);
+    ASSERT_TRUE(first_page_ok);
+    ASSERT_TRUE(second_page_ok);
+    ASSERT_TRUE(exhausted_page_ok);
+    ASSERT_TRUE(toon_page_ok);
+    ASSERT_TRUE(empty_label_omitted_ok);
+    ASSERT_TRUE(empty_label_toon_ok);
+    ASSERT_TRUE(combined_ok);
+    ASSERT_TRUE(large_offset_ok);
+    ASSERT_TRUE(type_error_unchanged);
+    PASS();
+}
+
+/* Resource discovery methods this server doesn't populate must return EMPTY
+ * lists, not -32601 Method-not-found: clients like Cline probe them on connect
+ * and surface the errors as a failed connection (#958). */
+TEST(mcp_resource_discovery_methods_return_empty_lists) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    struct {
+        const char *method;
+        const char *want;
+    } cases[] = {
+        {"resources/list", "\"resources\":[]"},
+        {"resources/templates/list", "\"resourceTemplates\":[]"},
+    };
+    for (int i = 0; i < 2; i++) {
+        char reqbuf[256];
+        snprintf(reqbuf, sizeof(reqbuf), "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"%s\"}",
+                 100 + i, cases[i].method);
+        char *resp = cbm_mcp_server_handle(srv, reqbuf);
+        ASSERT_NOT_NULL(resp);
+        ASSERT_NULL(strstr(resp, "Method not found"));
+        ASSERT_NOT_NULL(strstr(resp, cases[i].want));
+        free(resp);
+    }
+
+    cbm_mcp_server_free(srv);
     PASS();
 }
 
@@ -2494,6 +2977,11 @@ SUITE(mcp) {
     RUN_TEST(tool_explore_neighbors_expand_false);
     RUN_TEST(tool_search_graph_basic);
     RUN_TEST(tool_search_graph_includes_node_properties);
+    RUN_TEST(tool_search_graph_toon_never_leaks_internal_fields);
+    RUN_TEST(tool_output_byte_budgets);
+    RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
+    RUN_TEST(tool_search_graph_semantic_only_uses_vector_results_issue915);
+    RUN_TEST(mcp_resource_discovery_methods_return_empty_lists);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_ingest_dbt_manifest_issue576);
     RUN_TEST(tool_index_status_no_project);
