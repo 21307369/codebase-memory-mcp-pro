@@ -128,6 +128,7 @@ typedef struct {
  * Checks config dirs and PATH. home_dir is used for config dir checks. */
 cbm_detected_agents_t cbm_detect_agents(const char *home_dir);
 
+bool cbm_hook_augment_parse_bash_pattern_for_testing(const char *cmd, char *out, size_t out_sz);
 /* ── Agent MCP config upsert (per agent) ──────────────────────── */
 
 /* Codex CLI: upsert MCP entry in ~/.codex/config.toml. Returns 0 on success. */

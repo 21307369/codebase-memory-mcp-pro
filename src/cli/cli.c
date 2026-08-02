@@ -72,6 +72,10 @@ enum {
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef __FreeBSD__
+#include <sys/sysctl.h> // KERN_PROC_PATHNAME — /proc-free self-path detection
+#include <sys/types.h>
+#endif
 #include "foundation/compat_fs.h"
 
 #ifndef CBM_VERSION
@@ -3308,6 +3312,15 @@ static void cbm_detect_self_path(char *buf, size_t buf_sz, const char *home) {
     if (_NSGetExecutablePath(buf, &sp_sz) != 0) {
         buf[0] = '\0';
     }
+#elif defined(__FreeBSD__)
+    /* FreeBSD has no /proc by default; sysctl KERN_PROC_PATHNAME returns the
+     * running executable's path without it. */
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+    size_t sp_sz = buf_sz;
+    exact = sysctl(mib, 4, buf, &sp_sz, NULL, 0) == 0 && sp_sz > 0 && sp_sz <= buf_sz;
+    if (!exact) {
+        buf[0] = '\0';
+    }
 #else
     ssize_t sp_len = readlink("/proc/self/exe", buf, buf_sz - SKIP_ONE);
     if (sp_len > 0) {
@@ -3482,6 +3495,12 @@ int cbm_cmd_install(int argc, char **argv) {
             (void)cbm_macos_adhoc_sign(sign_path);
         }
     }
+    char shell_rc[CLI_BUF_1K] = {0};
+#if !defined(_WIN32) && !defined(CBM_PACKAGE_MANAGED)
+    /* Leave shell_rc empty under CBM_PACKAGE_MANAGED: the package manager owns
+     * PATH via its prefix, so install must not append `export PATH=...` to the
+     * user's shell rc. cli_install_activate() skips the PATH step on empty rc. */
+    snprintf(shell_rc, sizeof(shell_rc), "%s", cbm_detect_shell_rc(home));
 #endif
 
     /* Step 3: Install/refresh all agent configs, pointing at the install target. */
@@ -3500,8 +3519,13 @@ int cbm_cmd_install(int argc, char **argv) {
         }
     }
 
-    printf("\nInstall complete. Restart your shell or run:\n");
-    printf("  source %s\n", rc);
+    printf("\nInstall complete. Please restart your coding-agent sessions to "
+           "properly take this into account.\n");
+#ifndef _WIN32
+    if (shell_rc[0]) {
+        printf("Restart your shell or run:\n  source %s\n", shell_rc);
+    }
+#endif
     if (dry_run) {
         printf("\n(dry-run — no files were modified)\n");
     }

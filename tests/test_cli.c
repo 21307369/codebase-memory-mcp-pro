@@ -1421,6 +1421,104 @@ TEST(cli_install_and_uninstall) {
         snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, sk[i].name);
         struct stat st;
         ASSERT_EQ(stat(path, &st), 0);
+
+TEST(cli_hook_augment_bash_pattern_extractor) {
+    char out[256];
+
+    /* common forms */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("rg -n CreateStripeCheckout .", out,
+                                                                sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -rn CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -e CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("ag CreateStripeCheckout src/", out,
+                                                                sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("git grep CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* value-taking flags are skipped correctly */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -A 5 CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("rg -t py CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* env-var prefix and wrappers */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("FOO=bar rg CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rtk grep -n CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "tokf run rg CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "env FOO=bar rg CreateStripeCheckout .", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    /* rtk -l <N> shadows grep's -l with a value-taking form — bail out */
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing(
+        "rtk grep -l 80 CreateStripeCheckout .", out, sizeof(out)));
+
+    /* bail-out cases */
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -f /path/patterns .", out,
+                                                                 sizeof(out)));
+    ASSERT_FALSE(
+        cbm_hook_augment_parse_bash_pattern_for_testing("grep -e FOO -e BAR .", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("ls -la", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing("", out, sizeof(out)));
+    ASSERT_FALSE(cbm_hook_augment_parse_bash_pattern_for_testing(NULL, out, sizeof(out)));
+
+    /* -- end-of-flags separator */
+    ASSERT_TRUE(cbm_hook_augment_parse_bash_pattern_for_testing("grep -- CreateStripeCheckout .",
+                                                                out, sizeof(out)));
+    ASSERT_STR_EQ(out, "CreateStripeCheckout");
+
+    PASS();
+}
+
+TEST(cli_hook_augment_lifecycle_output_contract) {
+    static const struct {
+        const char *event;
+        const char *scope;
+    } cases[] = {
+        {"SessionStart", "Session context"},
+        {"SubagentStart", "Subagent context"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char input[512];
+        snprintf(input, sizeof(input),
+                 "{\"hook_event_name\":\"%s\","
+                 "\"cwd\":\"/definitely-not-indexed/cbm-secret-path\"}",
+                 cases[i].event);
+        char *output = cbm_hook_augment_lifecycle_json(input);
+        ASSERT_NOT_NULL(output);
+        yyjson_doc *doc = yyjson_read(output, strlen(output), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        yyjson_val *specific = yyjson_obj_get(root, "hookSpecificOutput");
+        ASSERT(specific && yyjson_is_obj(specific));
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(specific, "hookEventName")), cases[i].event);
+        const char *context = yyjson_get_str(yyjson_obj_get(specific, "additionalContext"));
+        ASSERT_NOT_NULL(context);
+        ASSERT(strstr(context, cases[i].scope) != NULL);
+        ASSERT(strstr(context, "search_graph") != NULL);
+        ASSERT(strstr(context, "trace_path") != NULL);
+        ASSERT(strstr(context, "check_index_coverage") != NULL);
+        ASSERT(strstr(context, "grep") != NULL);
+        ASSERT(strstr(context, "cbm-secret-path") == NULL);
+        if (strcmp(cases[i].event, "SessionStart") == 0)
+            ASSERT(strstr(context, "Active tier: Tier 2") != NULL);
+        yyjson_doc_free(doc);
+        free(output);
     }
 
     /* Uninstall */
@@ -2840,6 +2938,48 @@ SUITE(cli) {
     RUN_TEST(cli_install_plan_hooks_opt_in_default);
     RUN_TEST(cli_codex_session_hook_issue330);
     RUN_TEST(cli_gemini_session_hook_parity);
+    RUN_TEST(cli_claude_subagent_hook);
+    RUN_TEST(cli_claude_hook_mutation_converges_mixed_owned_duplicates);
+    RUN_TEST(cli_claude_subagent_hook_preserves_user_entry);
+    RUN_TEST(cli_claude_session_hook_preserves_user_entry);
+    RUN_TEST(cli_claude_lifecycle_hooks_delegate_to_augmenter);
+    RUN_TEST(cli_copilot_install_preserves_foreign_named_manifest);
+    RUN_TEST(cli_copilot_uninstall_preserves_foreign_named_manifest);
+    RUN_TEST(cli_copilot_uninstall_preserves_canonical_shaped_foreign_manifest);
+    RUN_TEST(cli_vscode_only_installs_copilot_durable_context);
+    RUN_TEST(cli_lifecycle_hooks_preserve_foreign_substring_commands);
+    RUN_TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server);
+    RUN_TEST(cli_junie_foreign_analysis_alias_falls_back_to_parent_handoff);
+    RUN_TEST(cli_mcp_installers_preserve_foreign_same_name_entries);
+    RUN_TEST(cli_installer_rejects_symlinked_agent_roots);
+    RUN_TEST(cli_claude_hook_scripts_shell_quote_binary_path);
+    RUN_TEST(cli_claude_hook_commands_shell_quote_custom_config_dir);
+    RUN_TEST(cli_codex_migrates_to_single_hook_representation);
+    RUN_TEST(cli_hook_augment_context_tracks_search_json_shape);
+    RUN_TEST(cli_hook_augment_bash_pattern_extractor);
+    RUN_TEST(cli_hook_augment_lifecycle_output_contract);
+    RUN_TEST(cli_hook_augment_subagent_tier_router_contract);
+    RUN_TEST(cli_hook_augment_subagent_no_project_guidance_is_read_only);
+    RUN_TEST(cli_hook_augment_post_read_event_and_path_contract);
+    RUN_TEST(cli_hook_augment_hermes_dialect_contract);
+    RUN_TEST(cli_hook_augment_qoder_lifecycle_contract);
+#ifndef _WIN32
+    RUN_TEST(cli_qoder_migrates_user_prompt_hook_to_lifecycle_and_read);
+#endif
+    RUN_TEST(cli_hook_augment_kimi_user_prompt_contract);
+    RUN_TEST(cli_hook_augment_devin_lifecycle_contract);
+    RUN_TEST(cli_hook_augment_cline_lifecycle_contract);
+    RUN_TEST(cli_hook_upsert_rejects_malformed_settings);
+    RUN_TEST(cli_hook_upsert_rejects_concurrent_same_event_update);
+#ifndef _WIN32
+    RUN_TEST(cli_upgrade_migrates_released_claude_hook_scripts);
+    RUN_TEST(cli_upgrade_preserves_near_legacy_claude_hook_script);
+    RUN_TEST(cli_hook_upsert_rejects_linked_settings);
+    RUN_TEST(cli_claude_hook_script_collisions_are_not_registered);
+    RUN_TEST(cli_codex_legacy_migration_rejects_linked_config);
+#endif
+    RUN_TEST(cli_uninstall_removes_claude_hook_scripts);
+    RUN_TEST(cli_uninstall_preserves_modified_claude_hook_script);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
     RUN_TEST(cli_detect_agents_finds_antigravity);

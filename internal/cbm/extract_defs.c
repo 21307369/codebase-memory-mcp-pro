@@ -3868,6 +3868,25 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
             }
         }
 
+        // Java enums wrap methods inside enum_body_declarations; iterate
+        // through to reach the method_declaration nodes.
+        if (strcmp(ts_node_type(child), "enum_body_declarations") == 0) {
+            uint32_t dc = ts_node_child_count(child);
+            for (uint32_t j = 0; j < dc; j++) {
+                TSNode dchild = ts_node_child(child, j);
+                if (ts_node_is_null(dchild) ||
+                    !cbm_kind_in_set(dchild, spec->function_node_types)) {
+                    continue;
+                }
+                TSNode nn = resolve_method_name(dchild, ctx->language);
+                if (ts_node_is_null(nn)) {
+                    continue;
+                }
+                push_method_def(ctx, dchild, class_node, class_qn, spec, nn);
+            }
+            continue;
+        }
+
         // Python wraps @classmethod / @staticmethod / @property methods in
         // a decorated_definition node. Peek through it to find the inner
         // function_definition so we still emit a Method entry.
@@ -5274,7 +5293,9 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, walk_
             strcmp(ck, "declaration_list") == 0 || strcmp(ck, "body") == 0 ||
             strcmp(ck, "block") == 0 || strcmp(ck, "suite") == 0 || strcmp(ck, "enum_body") == 0 ||
             strcmp(ck, "enum_body_declarations") == 0 ||
-            // Groovy class bodies are a `closure` node; routing through the
+            // Java interface bodies: gated to Java so grammars that
+            // share these node names (TypeScript, Apex, Dart) are unaffected.
+            (strcmp(ck, "interface_body") == 0 && spec->language == CBM_LANG_JAVA) ||            // Groovy class bodies are a `closure` node; routing through the
             // nested-class path keeps methods from being re-walked (and thus
             // double-extracted) as top-level functions. Gated to Groovy so other
             // grammars that also name a node "closure" are unaffected.
