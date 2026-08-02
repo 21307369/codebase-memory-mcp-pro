@@ -1727,7 +1727,8 @@ static bool run_semantic_query_core(const char *args, cbm_store_t *store, const 
         if (cbm_store_vector_search(store, project, keywords, ki, sem_limit, policy, &vresults,
                                     &vcount, out_total ? &total : NULL) == CBM_STORE_OK &&
             vcount > 0) {
-            cbm_store_free_vector_results(vresults, vcount);
+            *out_vresults = vresults;
+            *out_vcount = vcount;
         }
         if (out_total) {
             *out_total = total;
