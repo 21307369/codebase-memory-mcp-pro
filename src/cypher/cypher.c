@@ -4212,8 +4212,6 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         if (start_bound && patn->rel_count > 0) {
             const char *tv = nvar;
             expand_pattern_rels(store, patn, bindings, bind_count, bind_cap, &tv, opt);
-<<<<<<< ours
-=======
             continue;
         }
 
@@ -4236,7 +4234,6 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         int rc = 0;
         if (patn->rel_count == 0) {
             rc = cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
->>>>>>> theirs
         } else {
             cbm_node_t *extra_nodes = NULL;
             int extra_count = 0;
