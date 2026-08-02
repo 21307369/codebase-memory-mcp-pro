@@ -264,6 +264,98 @@ TEST(resolve_same_module) {
     PASS();
 }
 
+TEST(resolve_same_module_only_on_self_receiver) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "get", "proj.pkg.service.get", "Function");
+
+    /* Dotted call with unrelated receiver (e.g. "axios.get") -> should NOT resolve */
+    cbm_resolution_t res1 = cbm_registry_resolve(r, "axios.get", "proj.pkg.service", NULL, NULL, 0);
+    ASSERT_TRUE(res1.qualified_name == NULL || res1.qualified_name[0] == '\0');
+
+    /* Dotted call with delegation pattern (e.g. "_get_store().get") -> should NOT resolve */
+    cbm_resolution_t res2 = cbm_registry_resolve(r, "_get_store().get", "proj.pkg.service", NULL, NULL, 0);
+    ASSERT_TRUE(res2.qualified_name == NULL || res2.qualified_name[0] == '\0');
+
+    /* Dotted call with self-receiver (e.g. "self.get") -> should resolve */
+    cbm_resolution_t res3 = cbm_registry_resolve(r, "self.get", "proj.pkg.service", NULL, NULL, 0);
+    ASSERT_STR_EQ(res3.qualified_name, "proj.pkg.service.get");
+    ASSERT_STR_EQ(res3.strategy, "same_module");
+
+    /* Dotted call with exact module name prefix (e.g. "proj.pkg.service.get") -> should resolve */
+    cbm_resolution_t res4 = cbm_registry_resolve(r, "proj.pkg.service.get", "proj.pkg.service", NULL, NULL, 0);
+    ASSERT_STR_EQ(res4.qualified_name, "proj.pkg.service.get");
+
+    /* Dotted call with namespace/module last segment (e.g. "service.get") -> should resolve */
+    cbm_resolution_t res5 = cbm_registry_resolve(r, "service.get", "proj.pkg.service", NULL, NULL, 0);
+    ASSERT_STR_EQ(res5.qualified_name, "proj.pkg.service.get");
+    ASSERT_STR_EQ(res5.strategy, "same_module");
+
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* A package/namespace-qualified callee whose bare name is defined in several
+ * places must resolve to the package named in the call — not collapse onto a
+ * single winner. Regression for qualified cross-file calls (e.g. Perl
+ * Foo::Bar::sub()) where the same sub name exists in multiple packages. */
+TEST(resolve_qualified_disambiguates_same_name) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "save", "proj.lib.App.Alpha.save", "Function");
+    cbm_registry_add(r, "save", "proj.lib.App.Beta.save", "Function");
+    cbm_registry_add(r, "save", "proj.lib.App.Gamma.save", "Function");
+
+    /* Each fully-qualified call routes to its own package. */
+    cbm_resolution_t a =
+        cbm_registry_resolve(r, "App::Alpha::save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(a.qualified_name, "proj.lib.App.Alpha.save");
+    ASSERT_STR_EQ(a.strategy, "qualified_suffix");
+
+    cbm_resolution_t b =
+        cbm_registry_resolve(r, "App::Beta::save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(b.qualified_name, "proj.lib.App.Beta.save");
+
+    cbm_resolution_t g =
+        cbm_registry_resolve(r, "App::Gamma::save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(g.qualified_name, "proj.lib.App.Gamma.save");
+
+    /* The dotted callee form (Go/Python/C#) disambiguates identically. */
+    cbm_resolution_t dotted =
+        cbm_registry_resolve(r, "App.Beta.save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_STR_EQ(dotted.qualified_name, "proj.lib.App.Beta.save");
+    ASSERT_STR_EQ(dotted.strategy, "qualified_suffix");
+
+    /* A qualified callee whose tail matches NO candidate falls through to the
+     * existing bare-name scoring (never a qualified_suffix result). */
+    cbm_resolution_t nomatch =
+        cbm_registry_resolve(r, "Other::Pkg::save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_TRUE(!nomatch.strategy || strcmp(nomatch.strategy, "qualified_suffix") != 0);
+
+    /* A bare call stays ambiguous (no qualifier → no disambiguation signal). */
+    cbm_resolution_t bare =
+        cbm_registry_resolve(r, "save", "proj.lib.App.Caller", NULL, NULL, 0);
+    ASSERT_TRUE(!bare.strategy || strcmp(bare.strategy, "qualified_suffix") != 0);
+
+    cbm_registry_free(r);
+    PASS();
+}
+
+/* When two candidates share the same qualified tail, a qualified callee is
+ * genuinely ambiguous and must fall through to bare-name scoring rather than
+ * pick arbitrarily under the high-confidence qualified_suffix strategy. */
+TEST(resolve_qualified_ambiguous_tail_falls_through) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "run", "proj.svcA.Foo.Bar.run", "Function");
+    cbm_registry_add(r, "run", "proj.svcB.Foo.Bar.run", "Function");
+
+    /* "Foo::Bar::run" tail matches BOTH candidates → not unique → fall through. */
+    cbm_resolution_t res =
+        cbm_registry_resolve(r, "Foo::Bar::run", "proj.svcA.Caller", NULL, NULL, 0);
+    ASSERT_TRUE(!res.strategy || strcmp(res.strategy, "qualified_suffix") != 0);
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 TEST(resolve_import_map) {
     cbm_registry_t *r = cbm_registry_new();
     cbm_registry_add(r, "Process", "proj.pkg.worker.Process", "Function");
@@ -628,9 +720,98 @@ TEST(fuzzy_no_import_map_passthrough) {
 
 /* ── Suite ─────────────────────────────────────────────────────── */
 
+/* Method call THROUGH an imported symbol that is itself an indexed node
+ * (`from m import sig; sig.send()`). The import-map value is the symbol QN
+ * and the callee carries a suffix — resolution must return symbol.send, NOT
+ * the bare symbol node. The #979 direct-hit early return swallowed the
+ * suffix whenever the base symbol existed as an exact node, degrading
+ * django-scale graphs by ~11K CALLS/TESTS edges (e.g. every
+ * `user_logged_in.send(...)` bound to the signal VARIABLE instead of
+ * Signal.send). Regression guard for #1000. */
+TEST(resolve_import_map_alias_with_suffix_hits_method) {
+    cbm_registry_t *r = cbm_registry_new();
+    cbm_registry_add(r, "user_logged_in", "proj.auth.signals.user_logged_in", "Variable");
+    cbm_registry_add(r, "send", "proj.auth.signals.user_logged_in.send", "Method");
+    const char *keys[] = {"user_logged_in"};
+    const char *vals[] = {"proj.auth.signals.user_logged_in"};
+    cbm_resolution_t res =
+        cbm_registry_resolve(r, "user_logged_in.send", "proj.auth.views", keys, vals, 1);
+    ASSERT_STR_EQ(res.qualified_name, "proj.auth.signals.user_logged_in.send");
+    ASSERT_STR_EQ(res.strategy, "import_map");
+    cbm_registry_free(r);
+    PASS();
+}
+
+TEST(resolve_qualified_receiver_awareness) {
+    cbm_registry_t *r = cbm_registry_new();
+    
+    /* 1. Register a Method candidate under Class Service: proj.pkg.Service.get */
+    cbm_registry_add(r, "Service", "proj.pkg.Service", "Class");
+    cbm_registry_add(r, "get", "proj.pkg.Service.get", "Method");
+
+    /* 2. Register a Module axios */
+    cbm_registry_add(r, "axios", "proj.axios", "Module");
+
+    /* Test Case A: Unrelated receiver that is a known module/type -> should NOT resolve */
+    /* axios.get called, axios is a known Module */
+    {
+        cbm_resolution_t res = cbm_registry_resolve(r, "axios.get", "proj.app", NULL, NULL, 0);
+        ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+    }
+
+    /* Test Case B: Unrelated receiver that is an imported receiver -> should NOT resolve */
+    /* other_service.get called, other_service is an imported alias/key mapping to OtherService */
+    {
+        const char *keys[] = {"other_service"};
+        const char *vals[] = {"proj.pkg.OtherService"};
+        cbm_resolution_t res = cbm_registry_resolve(r, "other_service.get", "proj.app", keys, vals, 1);
+        ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+    }
+
+    /* Test Case B2: Related receiver that is an imported receiver -> should resolve */
+    /* my_service.get called, my_service is an imported alias/key mapping to Service */
+    {
+        const char *keys[] = {"my_service"};
+        const char *vals[] = {"proj.pkg.Service"};
+        cbm_resolution_t res = cbm_registry_resolve(r, "my_service.get", "proj.app", keys, vals, 1);
+        ASSERT_STR_EQ(res.qualified_name, "proj.pkg.Service.get");
+    }
+
+    /* Test Case C: Receiver that is an unregistered/instance variable (e.g. "d.get") */
+    /* should resolve to Method, matching the Java enum case where receiver is just an instance */
+    {
+        cbm_resolution_t res = cbm_registry_resolve(r, "d.get", "proj.app", NULL, NULL, 0);
+        ASSERT_STR_EQ(res.qualified_name, "proj.pkg.Service.get");
+    }
+
+    /* Test Case D: Fully qualified receiver matching the candidate's parent path -> should resolve */
+    {
+        cbm_resolution_t res = cbm_registry_resolve(r, "Service.get", "proj.app", NULL, NULL, 0);
+        ASSERT_STR_EQ(res.qualified_name, "proj.pkg.Service.get");
+    }
+
+    /* Test Case E: Double colon C++/Perl style qualification (e.g. Service::get) -> should resolve */
+    {
+        cbm_resolution_t res = cbm_registry_resolve(r, "Service::get", "proj.app", NULL, NULL, 0);
+        ASSERT_STR_EQ(res.qualified_name, "proj.pkg.Service.get");
+    }
+
+    /* Test Case F: If the candidate is a Function (not a Method), we always enforce qualified suffix match */
+    /* Register unique Function helper.compute */
+    cbm_registry_add(r, "compute", "proj.pkg.helper.compute", "Function");
+    {
+        cbm_resolution_t res = cbm_registry_resolve(r, "unrelated.compute", "proj.app", NULL, NULL, 0);
+        ASSERT_TRUE(res.qualified_name == NULL || res.qualified_name[0] == '\0');
+    }
+
+    cbm_registry_free(r);
+    PASS();
+}
+
 SUITE(registry) {
     /* FQN */
     RUN_TEST(fqn_simple);
+
     RUN_TEST(fqn_no_name);
     RUN_TEST(fqn_python_init);
     RUN_TEST(fqn_js_index);
@@ -656,9 +837,13 @@ SUITE(registry) {
     RUN_TEST(registry_no_duplicates);
     /* Resolution */
     RUN_TEST(resolve_same_module);
+    RUN_TEST(resolve_same_module_only_on_self_receiver);
+    RUN_TEST(resolve_qualified_disambiguates_same_name);
+    RUN_TEST(resolve_qualified_ambiguous_tail_falls_through);
     RUN_TEST(resolve_import_map);
     RUN_TEST(resolve_import_map_bare_function);
     RUN_TEST(resolve_unique_name);
+    RUN_TEST(resolve_qualified_receiver_awareness);
     RUN_TEST(resolve_unresolved);
     RUN_TEST(resolve_many_nodes);
     /* Confidence band */

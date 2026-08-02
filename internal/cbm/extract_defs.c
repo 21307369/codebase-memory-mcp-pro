@@ -3553,64 +3553,81 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
 
 // Find the body/members node inside a class node
 static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
+    TSNode result = {0};
     // Try field names first
     static const char *body_fields[] = {"body", "members", "class_body", "declaration_list", NULL};
     for (const char **f = body_fields; *f; f++) {
         TSNode body = ts_node_child_by_field_name(class_node, *f, (uint32_t)strlen(*f));
         if (!ts_node_is_null(body)) {
-            if (strcmp(ts_node_type(body), "enum_body") == 0) {
-                TSNode decls = cbm_find_child_by_kind(body, "enum_body_declarations");
-                if (!ts_node_is_null(decls)) {
-                    return decls;
-                }
-            }
-            return body;
+            result = body;
+            break;
         }
     }
     // Go: type_spec -> type field (interface_type or struct_type)
-    if (lang == CBM_LANG_GO) {
+    if (ts_node_is_null(result) && lang == CBM_LANG_GO) {
         TSNode type_inner = ts_node_child_by_field_name(class_node, TS_FIELD("type"));
         if (!ts_node_is_null(type_inner)) {
-            return type_inner;
+            result = type_inner;
         }
     }
     // ObjC: class_implementation/class_interface has no single body node
     // Methods are inside implementation_definition children directly
-    if (lang == CBM_LANG_OBJC) {
+    if (ts_node_is_null(result) && lang == CBM_LANG_OBJC) {
         return class_node; // iterate children of the class node itself
     }
     // Squirrel: class_declaration has no body field — member_declaration nodes
     // (each wrapping a function_declaration) are direct children of the class.
-    if (lang == CBM_LANG_SQUIRREL) {
+    if (ts_node_is_null(result) && lang == CBM_LANG_SQUIRREL) {
         return class_node;
     }
+    // Smali: field_definition nodes are direct children of class_definition (no
+    // dedicated body node) — iterate the class node itself.
+    if (ts_node_is_null(result) && lang == CBM_LANG_SMALI) {
+        return class_node;
+    }
+    // GraphQL: object/interface fields live in a fields_definition child.
+    if (ts_node_is_null(result) && lang == CBM_LANG_GRAPHQL) {
+        TSNode b = cbm_find_child_by_kind(class_node, "fields_definition");
+        if (!ts_node_is_null(b)) {
+            result = b;
+        }
+    }
+    // Prisma: model columns live in a statement_block child. Gated to Prisma so
+    // general fallback behavior is unchanged.
+    if (ts_node_is_null(result) && lang == CBM_LANG_PRISMA) {
+        TSNode b = cbm_find_child_by_kind(class_node, "statement_block");
+        if (!ts_node_is_null(b)) {
+            result = b;
+        }
+    }
     // Fallback: search children for known body node types
-    static const char *body_types[] = {"class_body",
-                                       "interface_body",
-                                       "enum_body",
-                                       "protocol_body",
-                                       "template_body",
-                                       "interface_type",
-                                       "struct_type",
-                                       "field_declaration_list",
-                                       "compound_statement",
-                                       "block",
-                                       "closure",
-                                       "implementation_definition",
-                                       NULL};
-    uint32_t count = ts_node_child_count(class_node);
-    TSNode result = {0};
-    for (uint32_t i = 0; i < count; i++) {
-        TSNode child = ts_node_child(class_node, i);
-        const char *ck = ts_node_type(child);
-        for (const char **t = body_types; *t; t++) {
-            if (strcmp(ck, *t) == 0) {
-                result = child;
+    if (ts_node_is_null(result)) {
+        static const char *body_types[] = {"class_body",
+                                           "interface_body",
+                                           "enum_body",
+                                           "protocol_body",
+                                           "template_body",
+                                           "interface_type",
+                                           "struct_type",
+                                           "field_declaration_list",
+                                           "compound_statement",
+                                           "block",
+                                           "closure",
+                                           "implementation_definition",
+                                           NULL};
+        uint32_t count = ts_node_child_count(class_node);
+        for (uint32_t i = 0; i < count; i++) {
+            TSNode child = ts_node_child(class_node, i);
+            const char *ck = ts_node_type(child);
+            for (const char **t = body_types; *t; t++) {
+                if (strcmp(ck, *t) == 0) {
+                    result = child;
+                    break;
+                }
+            }
+            if (!ts_node_is_null(result)) {
                 break;
             }
-        }
-        if (!ts_node_is_null(result)) {
-            break;
         }
     }
     if (!ts_node_is_null(result) && strcmp(ts_node_type(result), "enum_body") == 0) {
@@ -3625,7 +3642,6 @@ static TSNode find_class_body(TSNode class_node, CBMLanguage lang) {
     }
     return result;
 }
-
 // Dart: resolve method name from method_signature/function_signature.
 static TSNode resolve_dart_method_name(TSNode child, const char *ck) {
     if (strcmp(ck, "method_signature") == 0) {
