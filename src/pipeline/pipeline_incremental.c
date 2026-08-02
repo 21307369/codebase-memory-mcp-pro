@@ -762,9 +762,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         if (cbm_pipeline_persistence(p) && repo_path && !cbm_artifact_exists(repo_path)) {
             arc = cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_BEST);
             if (arc != 0) {
-                const char *err = cbm_artifact_export_last_error();
-                cbm_log_error("pipeline.err", "phase", "artifact_export", "err",
-                              err ? err : "unknown");
+                cbm_log_error("pipeline.err", "phase", "artifact_export", "err", "failed");
             }
         }
         free(is_changed);
@@ -900,6 +898,7 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 
     /* Step 7: Dump to disk (preserves mode-skipped hash rows so the next
      * reindex can correctly classify those files instead of seeing them
+     * as missing). */
     int dp_rc =
         dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
                          mode_skipped_count, cbm_pipeline_repo_path(p),

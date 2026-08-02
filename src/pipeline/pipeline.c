@@ -865,6 +865,8 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     if (check_store && cbm_store_check_integrity(check_store)) {
         cbm_file_hash_t *hashes = NULL;
         int hash_count = 0;
+        int fmt = 0;
+        (void)cbm_store_get_format_version(check_store, &fmt);
         cbm_index_mode_t stored_mode = CBM_MODE_FAST;
         index_mode_metadata_status_t stored_mode_status =
             read_stored_index_mode(check_store, p->project_name, &stored_mode);
@@ -983,7 +985,6 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
     bool format_stamped = true;
     if (hash_store) {
-        bool hash_records_complete = true;
         if (cbm_store_set_format_version(hash_store, CBM_INDEX_FORMAT_VERSION) != CBM_STORE_OK) {
             cbm_log_error("pipeline.err", "phase", "persist_format_version");
             format_stamped = false;
