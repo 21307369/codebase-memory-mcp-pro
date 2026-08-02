@@ -16,6 +16,7 @@
 #include "cbm.h"
 #include "lsp/go_lsp.h" /* CBMLSPDef for cbm_parallel_resolve cross-LSP inputs */
 #include <stdatomic.h>
+#include <string.h>
 
 /* ── Shared pipeline constants ─────────────────────────────────── */
 

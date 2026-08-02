@@ -3495,6 +3495,7 @@ int cbm_cmd_install(int argc, char **argv) {
             (void)cbm_macos_adhoc_sign(sign_path);
         }
     }
+#endif
     char shell_rc[CLI_BUF_1K] = {0};
 #if !defined(_WIN32) && !defined(CBM_PACKAGE_MANAGED)
     /* Leave shell_rc empty under CBM_PACKAGE_MANAGED: the package manager owns
