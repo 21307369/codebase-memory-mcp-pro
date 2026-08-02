@@ -2768,6 +2768,26 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     def.decorators = extract_decorators(a, node, ctx->source, ctx->language, spec);
     extract_route_from_decorators(a, node, ctx->source, spec, &def.route_path, &def.route_method);
 
+    // Rust: disambiguate cfg-gated twin functions by folding the #[cfg(...)]
+    // predicate into the QN so both branches survive the graph upsert (#495).
+    if (ctx->language == CBM_LANG_RUST) {
+        def.qualified_name = rust_cfg_qualified_name(a, def.qualified_name, def.decorators);
+        def.is_test = rust_def_is_test(def.decorators);
+    }
+
+    // C++/CUDA: GoogleTest macros are test functions (#1266).
+    if (is_gtest) {
+        def.is_test = true;
+    }
+
+    // A function/method defined in a file cbm treats as a test file is itself
+    // a test, regardless of its own name (tests/helpers/fixtures.c has none
+    // of the test_/_test naming conventions, but every function in it is
+    // still test code) (#1294). OR'd so the Rust attribute check above, which
+    // additionally catches #[test] functions embedded in an otherwise regular
+    // .rs file, is never downgraded by this.
+    def.is_test = def.is_test || ctx->result->is_test_file;
+
     // Docstring
     def.docstring = extract_docstring(a, node, ctx->source, ctx->language);
 
@@ -3791,6 +3811,10 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
 
     // MinHash fingerprint
     compute_fingerprint(ctx, &def, child);
+
+    // A method on a class defined in a test file (e.g. a JUnit/pytest
+    // TestFoo.test_bar) is itself a test, same as free functions (#1294).
+    def.is_test = def.is_test || ctx->result->is_test_file;
 
     cbm_defs_push(&ctx->result->defs, a, def);
 }

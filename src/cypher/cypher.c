@@ -3457,18 +3457,22 @@ typedef struct {
     int64_t *group_node_ids; /* per-item node id when the group var is a node (0 = not) */
 } with_agg_t;
 
-/* Build a group key from non-aggregate WITH items */
+/* Build a group key from non-aggregate WITH items.
+ *
+ * A grouping item is anything that is NOT an aggregate — including computed
+ * expressions such as labels(n), type(r), toLower(n.prop) and CASE. Testing
+ * `item->func` alone would misclassify those scalar functions as aggregates
+ * (they populate `func` too), collapsing every row into a single bogus group.
+ * Route them through project_item so the *evaluated* value forms the key,
+ * exactly as the RETURN path does. */
 static int with_agg_build_key(cbm_return_clause_t *wc, binding_t *b, char *key, size_t key_sz) {
     int kl = 0;
     for (int ci = 0; ci < wc->count; ci++) {
-        /* Aggregates are computed per-group; everything else (bare vars, properties,
-         * and non-aggregate functions like type(r)) is a grouping dimension and must
-         * be projected into the key — mirrors the RETURN path (ret_agg_build_key). */
         if (is_aggregate_func(wc->items[ci].func)) {
             continue;
         }
-        char fb[CBM_SZ_512];
-        const char *v = project_item(b, &wc->items[ci], fb, sizeof(fb));
+        char vbuf[CBM_SZ_512];
+        const char *v = project_item(b, &wc->items[ci], vbuf, sizeof(vbuf));
         kl += snprintf(key + kl, key_sz - (size_t)kl, "%s|", v ? v : "");
         if (kl >= (int)key_sz) {
             kl = (int)key_sz - SKIP_ONE;
@@ -3508,13 +3512,14 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
             (*aggs)[found].group_vals[ci] = heap_strdup("0");
             continue;
         }
-        char fb[CBM_SZ_512];
-        const char *v = project_item(b, &wc->items[ci], fb, sizeof(fb));
+        char vbuf[CBM_SZ_512];
+        const char *v = project_item(b, &wc->items[ci], vbuf, sizeof(vbuf));
         (*aggs)[found].group_vals[ci] = heap_strdup(v ? v : "");
         /* If this group item is a bare node variable, remember its id so the
          * carried virtual var can re-fetch any property (group_vals holds only
-         * the name). Functions (type(r), labels(n), …) carry no node identity. */
-        if (!wc->items[ci].func && !wc->items[ci].property && wc->items[ci].variable) {
+         * the name). A computed expression has no node identity to carry. */
+        if (!wc->items[ci].property && wc->items[ci].variable && !wc->items[ci].func &&
+            !wc->items[ci].kase && !wc->items[ci].args) {
             cbm_node_t *gn = binding_get(b, wc->items[ci].variable);
             if (gn) {
                 (*aggs)[found].group_node_ids[ci] = gn->id;
@@ -3527,8 +3532,6 @@ static int with_agg_find_or_create(with_agg_t **aggs, int *agg_cnt, int *agg_cap
 /* Accumulate aggregation values for a binding */
 static void with_agg_accumulate(with_agg_t *agg, cbm_return_clause_t *wc, binding_t *b) {
     for (int ci = 0; ci < wc->count; ci++) {
-        /* Accumulate only true aggregates; non-aggregate functions are grouping
-         * dimensions (value fixed within a group, projected in build_key). */
         if (!is_aggregate_func(wc->items[ci].func)) {
             continue;
         }
@@ -3605,6 +3608,12 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
     int agg_cnt = 0;
 
     for (int bi = 0; bi < bind_count; bi++) {
+        /* #601: grouping is O(bindings x groups) and each iteration evaluates
+         * every non-aggregate expression. Abort if we blow the wall-clock
+         * budget, matching execute_return_agg. */
+        if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
+            break;
+        }
         char key[CBM_SZ_1K] = "";
         with_agg_build_key(wc, &bindings[bi], key, sizeof(key));
         int found = with_agg_find_or_create(&aggs, &agg_cnt, &agg_cap, wc, &bindings[bi], key);
@@ -3923,8 +3932,6 @@ static void ret_agg_init_group(ret_agg_entry_t *entry, const char *key, int item
 /* Accumulate a binding into RETURN aggregation */
 static void ret_agg_accumulate(ret_agg_entry_t *entry, cbm_return_clause_t *ret, binding_t *b) {
     for (int ci = 0; ci < ret->count; ci++) {
-        /* Accumulate only true aggregates; non-aggregate functions are grouping
-         * dimensions (their value is fixed within a group, projected in build_key). */
         if (!is_aggregate_func(ret->items[ci].func)) {
             continue;
         }
@@ -3977,11 +3984,6 @@ static void ret_agg_build_key(cbm_return_clause_t *ret, binding_t *b, char *key,
                               const char **vals, char valbufs[][CBM_SZ_512]) {
     int klen = 0;
     for (int ci = 0; ci < ret->count; ci++) {
-        /* Only AGGREGATE functions (COUNT/SUM/…) are excluded from the grouping
-         * key — their per-group value is computed in emit. Non-aggregate
-         * introspection/scalar functions (type(r), labels(n), toLower(x), …) are
-         * grouping dimensions and MUST be projected into the key, else every row
-         * collapses into one group (the `RETURN type(r), count(*)` bug). */
         if (is_aggregate_func(ret->items[ci].func)) {
             vals[ci] = "0";
             continue;
@@ -4006,8 +4008,6 @@ static void ret_agg_emit_row(cbm_return_clause_t *ret, ret_agg_entry_t *agg, res
     const char *row[CBM_SZ_32];
     char bufs[CBM_SZ_32][CBM_SZ_64];
     for (int ci = 0; ci < ret->count; ci++) {
-        /* Non-aggregate items (bare vars AND non-aggregate functions like type(r))
-         * emit their grouped projection; only true aggregates are formatted below. */
         if (!is_aggregate_func(ret->items[ci].func)) {
             row[ci] = agg->group_vals[ci];
             continue;
