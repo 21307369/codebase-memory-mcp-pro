@@ -498,6 +498,162 @@ TEST(cypher_exec_where_eq) {
     PASS();
 }
 
+/* #874: coalesce(var.prop, literal) in WHERE — null-safe numeric filters
+ * for audit queries over OPTIONAL graph properties. The parser rejected the
+ * call outright ("unexpected operator"); RETURN-side coalesce already
+ * worked, so only the WHERE leaf needs it. Semantics: when the property is
+ * missing/empty, the literal default is compared instead. */
+/* #797: variable-length / repeated-variable path semantics. Fixture:
+ * loopy has a SELF-LOOP as one of its outbound CALLS edges plus a real
+ * 2-chain loopy->mid->leaf. Correct openCypher semantics:
+ *  - a repeated node variable must unify: (a)-[:CALLS]->(a) matches ONLY
+ *    the self-loop, not every edge;
+ *  - relationship uniqueness within a path: the self-loop cannot be
+ *    traversed repeatedly, so no *k..k path exists beyond the real chain;
+ *  - the engine hop cap must not fabricate or silently truncate results. */
+TEST(cypher_exec_varlength_path_semantics_issue797) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t loopy = {.project = "test",
+                        .label = "Function",
+                        .name = "loopy",
+                        .qualified_name = "test.mod.loopy",
+                        .file_path = "mod.go",
+                        .start_line = 1,
+                        .end_line = 2};
+    cbm_node_t mid = {.project = "test",
+                      .label = "Function",
+                      .name = "mid",
+                      .qualified_name = "test.mod.mid",
+                      .file_path = "mod.go",
+                      .start_line = 3,
+                      .end_line = 4};
+    cbm_node_t leaf = {.project = "test",
+                       .label = "Function",
+                       .name = "leaf",
+                       .qualified_name = "test.mod.leaf",
+                       .file_path = "mod.go",
+                       .start_line = 5,
+                       .end_line = 6};
+    int64_t id_loopy = cbm_store_upsert_node(s, &loopy);
+    int64_t id_mid = cbm_store_upsert_node(s, &mid);
+    int64_t id_leaf = cbm_store_upsert_node(s, &leaf);
+    ASSERT_GT(id_loopy, 0);
+    cbm_edge_t self_loop = {
+        .project = "test", .source_id = id_loopy, .target_id = id_loopy, .type = "CALLS"};
+    cbm_edge_t e1 = {
+        .project = "test", .source_id = id_loopy, .target_id = id_mid, .type = "CALLS"};
+    cbm_edge_t e2 = {.project = "test", .source_id = id_mid, .target_id = id_leaf, .type = "CALLS"};
+    cbm_store_insert_edge(s, &self_loop);
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+
+    /* Bug 1: repeated variable must unify — only the self-loop matches. */
+    cbm_cypher_result_t r1 = {0};
+    ASSERT_EQ(cbm_cypher_execute(s, "MATCH (a)-[:CALLS]->(a) RETURN a.name", "test", 0, &r1), 0);
+    ASSERT_EQ(r1.row_count, 1);
+    cbm_cypher_result_free(&r1);
+
+    /* Bug 2: *2..2 from loopy has two relationship-unique trails: the
+     * self-loop followed by e1 reaches mid, and e1 followed by e2 reaches leaf.
+     * Reusing the self-loop within one trail remains forbidden. */
+    cbm_cypher_result_t r2 = {0};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (a {name: \"loopy\"})-[:CALLS*2..2]->(b) "
+                                 "RETURN DISTINCT b.name",
+                                 "test", 0, &r2),
+              0);
+    ASSERT_EQ(r2.row_count, 2);
+    bool saw_mid = false;
+    bool saw_leaf = false;
+    for (int i = 0; i < r2.row_count; i++) {
+        saw_mid |= strcmp(r2.rows[i][0], "mid") == 0;
+        saw_leaf |= strcmp(r2.rows[i][0], "leaf") == 0;
+    }
+    ASSERT_TRUE(saw_mid);
+    ASSERT_TRUE(saw_leaf);
+    cbm_cypher_result_free(&r2);
+
+    /* Bug 2 amplifier: no directed path of length 5 exists at all. */
+    cbm_cypher_result_t r3 = {0};
+    ASSERT_EQ(cbm_cypher_execute(s,
+                                 "MATCH (a {name: \"loopy\"})-[:CALLS*5..5]->(b) "
+                                 "RETURN b.name",
+                                 "test", 0, &r3),
+              0);
+    ASSERT_EQ(r3.row_count, 0);
+    cbm_cypher_result_free(&r3);
+
+    /* Bug 3: a hop range beyond the engine ceiling must be an ADVERTISED
+     * clamp, not silently indistinguishable from "no such path". */
+    cbm_cypher_result_t r4 = {0};
+    ASSERT_EQ(
+        cbm_cypher_execute(s, "MATCH (a)-[:CALLS*150..150]->(b) RETURN b.name", "test", 0, &r4), 0);
+    ASSERT_EQ(r4.row_count, 0);
+    ASSERT_NOT_NULL(r4.warning);
+    ASSERT_NOT_NULL(strstr(r4.warning, "clamped"));
+    cbm_cypher_result_free(&r4);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_where_coalesce_issue874) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t a = {.project = "test",
+                    .label = "Function",
+                    .name = "deep_a",
+                    .qualified_name = "test.mod.deep_a",
+                    .file_path = "mod.py",
+                    .start_line = 1,
+                    .end_line = 2,
+                    .properties_json = "{\"transitive_loop_depth\":3}"};
+    cbm_node_t b = {.project = "test",
+                    .label = "Function",
+                    .name = "deep_b",
+                    .qualified_name = "test.mod.deep_b",
+                    .file_path = "mod.py",
+                    .start_line = 3,
+                    .end_line = 4,
+                    .properties_json = "{\"transitive_loop_depth\":1}"};
+    cbm_node_t c = {.project = "test",
+                    .label = "Function",
+                    .name = "plain_c",
+                    .qualified_name = "test.mod.plain_c",
+                    .file_path = "mod.py",
+                    .start_line = 5,
+                    .end_line = 6};
+    ASSERT_GT(cbm_store_upsert_node(s, &a), 0);
+    ASSERT_GT(cbm_store_upsert_node(s, &b), 0);
+    ASSERT_GT(cbm_store_upsert_node(s, &c), 0);
+
+    /* Default FAILS the predicate: only the node with depth 3 matches. */
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function) WHERE "
+                                "coalesce(f.transitive_loop_depth, 0) >= 2 "
+                                "RETURN f.qualified_name LIMIT 10",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    cbm_cypher_result_free(&r);
+
+    /* Default PASSES: the property-less node is included via the default. */
+    cbm_cypher_result_t r2 = {0};
+    rc = cbm_cypher_execute(s,
+                            "MATCH (f:Function) WHERE "
+                            "coalesce(f.transitive_loop_depth, 9) >= 2 "
+                            "RETURN f.qualified_name LIMIT 10",
+                            "test", 0, &r2);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r2.row_count, 2); /* deep_a (3) + plain_c (default 9) */
+    cbm_cypher_result_free(&r2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_where_regex) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -828,6 +984,115 @@ TEST(cypher_exec_variable_length) {
     ASSERT_EQ(rc, 0);
     /* Should find: ValidateOrder (1 hop), SubmitOrder (2 hops), LogError (1 hop) */
     ASSERT_GTE(r.row_count, 3);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Reproduce-first (#887): an EXPLICIT variable-length upper bound must still be
+ * capped at the engine ceiling (cbm_cypher_max_depth(), default 10). On
+ * origin/main, expand_var_length honoured an explicit `*1..N` verbatim (only the
+ * unbounded `*` / `*..m` forms were capped), so `[:CALLS*1..N]` passed N straight
+ * to cbm_store_bfs — an unbounded traversal (a DoS on cyclic graphs). RED before
+ * the clamp: a *1..12 walk over a 13-node chain
+ * returns all 12 hops (N01..N12). GREEN after: it stops at the depth-10 ceiling
+ * (N01..N10); N11/N12 are never emitted. max_rows=64 keeps the binding-expansion
+ * cap (bind_cap*10) well above the hop count, so DEPTH — not the binding cap — is
+ * the bound under test. */
+TEST(cypher_exec_var_length_explicit_bound_capped) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Linear chain N00 -CALLS-> N01 -> ... -> N12 (13 nodes, one node per hop). */
+    int64_t ids[13];
+    for (int i = 0; i < 13; i++) {
+        char name[8];
+        char qn[24];
+        snprintf(name, sizeof(name), "N%02d", i);
+        snprintf(qn, sizeof(qn), "test.N%02d", i);
+        cbm_node_t n = {.project = "test",
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "chain.go"};
+        ids[i] = cbm_store_upsert_node(s, &n);
+    }
+    for (int i = 0; i < 12; i++) {
+        cbm_edge_t e = {
+            .project = "test", .source_id = ids[i], .target_id = ids[i + 1], .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (a:Function {name: \"N00\"})-[:CALLS*1..12]->"
+                                "(x:Function) RETURN x.name",
+                                "test", 64, &r);
+    ASSERT_EQ(rc, 0);
+
+    /* Capped at 10 hops → exactly N01..N10; N11/N12 are beyond the ceiling. */
+    ASSERT_EQ(r.row_count, 10);
+    bool saw_n10 = false;
+    bool saw_n11 = false;
+    bool saw_n12 = false;
+    for (int i = 0; i < r.row_count; i++) {
+        const char *v = r.rows[i][0];
+        if (v && strcmp(v, "N10") == 0) {
+            saw_n10 = true;
+        }
+        if (v && strcmp(v, "N11") == 0) {
+            saw_n11 = true;
+        }
+        if (v && strcmp(v, "N12") == 0) {
+            saw_n12 = true;
+        }
+    }
+    ASSERT_TRUE(saw_n10);  /* within the ceiling — proves the traversal really ran */
+    ASSERT_FALSE(saw_n11); /* clamped away */
+    ASSERT_FALSE(saw_n12);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_variable_length_repeated_node_var_unifies) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function)-[:CALLS*1..2]->(f:Function) "
+                                "RETURN f.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 0);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_exec_var_length_no_reuse_self_loop) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "Recursive",
+                    .qualified_name = "test.Recursive",
+                    .file_path = "recursive.go"};
+    int64_t id = cbm_store_upsert_node(s, &n);
+    cbm_edge_t e = {.project = "test", .source_id = id, .target_id = id, .type = "CALLS"};
+    cbm_store_insert_edge(s, &e);
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function {name: \"Recursive\"})-[:CALLS*2..2]"
+                                "->(g:Function) RETURN g.name",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 0);
 
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
@@ -2622,6 +2887,9 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_limit);
     RUN_TEST(cypher_exec_order_by);
     RUN_TEST(cypher_exec_variable_length);
+    RUN_TEST(cypher_exec_var_length_explicit_bound_capped);
+    RUN_TEST(cypher_exec_variable_length_repeated_node_var_unifies);
+    RUN_TEST(cypher_exec_var_length_no_reuse_self_loop);
     RUN_TEST(cypher_exec_defines_edge);
     RUN_TEST(cypher_exec_no_results);
     RUN_TEST(cypher_exec_where_numeric);
