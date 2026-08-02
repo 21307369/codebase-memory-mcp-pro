@@ -1235,3 +1235,36 @@ int cbm_classify_string(const char *str, int len) {
 
     return NOT_FOUND;
 }
+
+const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *source) {
+    enum { TPL_BUF = 512 };
+    char buf[TPL_BUF];
+    size_t pos = 0;
+    uint32_t nc = ts_node_named_child_count(node);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode c = ts_node_named_child(node, i);
+        const char *k = ts_node_type(c);
+        if (strcmp(k, "string_fragment") == 0) {
+            char *frag = cbm_node_text(a, c, source);
+            if (!frag) {
+                continue;
+            }
+            size_t fl = strlen(frag);
+            if (pos + fl >= TPL_BUF) {
+                return NULL;
+            }
+            memcpy(buf + pos, frag, fl);
+            pos += fl;
+        } else if (strcmp(k, "template_substitution") == 0) {
+            if (pos + PAIR_LEN >= TPL_BUF) {
+                return NULL;
+            }
+            buf[pos++] = '{';
+            buf[pos++] = '}';
+        }
+    }
+    if (pos == 0) {
+        return NULL;
+    }
+    return cbm_arena_strndup(a, buf, pos);
+}
