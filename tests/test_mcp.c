@@ -1755,8 +1755,6 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp_dir);
     cbm_mkdir(proj_dir);
 
-<<<<<<< ours
-=======
     /* Caller passes `project_name` (the natural guess) instead of `project`. */
     char *resp = cbm_mcp_server_handle(
         srv, "{\"jsonrpc\":\"2.0\",\"id\":640,\"method\":\"tools/call\","
@@ -4638,7 +4636,6 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
     snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp_dir);
     cbm_mkdir(proj_dir);
 
->>>>>>> theirs
     /* Write sample source file */
     char src_path[512];
     snprintf(src_path, sizeof(src_path), "%s/main.go", proj_dir);
@@ -4659,8 +4656,6 @@ static cbm_mcp_server_t *setup_snippet_server(char *tmp_dir, size_t tmp_sz) {
                 "\t// server\n"
                 "}\n");
     fclose(fp);
-<<<<<<< ours
-=======
 
     /* Create server with in-memory store */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5464,7 +5459,6 @@ TEST(mcp_server_run_rapid_messages) {
 
     FILE *out_fp = tmpfile();
     ASSERT_NOT_NULL(out_fp);
->>>>>>> theirs
 
     /* Create server with in-memory store */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -5623,7 +5617,6 @@ TEST(snippet_exact_qn) {
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
     ASSERT_NOT_NULL(srv);
 
-<<<<<<< ours
     char *resp =
         call_snippet(srv, "{\"qualified_name\":\"test-project.cmd.server.main.HandleRequest\","
                           "\"project\":\"test-project\"}");
@@ -5639,7 +5632,7 @@ TEST(snippet_exact_qn) {
     ASSERT_NOT_NULL(strstr(resp, "\"callers\":0"));
     ASSERT_NOT_NULL(strstr(resp, "\"callees\":2"));
     free(resp);
-=======
+
     /* ── A: list_projects reports INTERNAL names; filters the ghost ── */
     char *list =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
@@ -5719,7 +5712,6 @@ TEST(snippet_exact_qn) {
     ASSERT_NOT_NULL(q_gamma);
     ASSERT_NOT_NULL(strstr(q_gamma, "not found"));
     free(q_gamma);
->>>>>>> theirs
 
     cbm_mcp_server_free(srv);
     cleanup_snippet_dir(tmp);
@@ -6783,8 +6775,6 @@ SUITE(mcp) {
     RUN_TEST(tool_manage_adr_no_project);
     RUN_TEST(tool_manage_adr_get_with_existing_adr);
     RUN_TEST(tool_manage_adr_unified_backend_issue256);
-<<<<<<< ours
-=======
     RUN_TEST(tool_manage_adr_append_extends_without_replacing);
     RUN_TEST(tool_manage_adr_append_creates_when_absent);
     RUN_TEST(tool_manage_adr_append_without_content_errors);
@@ -6806,7 +6796,6 @@ SUITE(mcp) {
     RUN_TEST(tool_manage_adr_get_accepts_symlink_path);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_contained_commands_clean_up_error_and_success);
->>>>>>> theirs
     RUN_TEST(tool_ingest_traces_basic);
     RUN_TEST(tool_ingest_traces_empty);
 
