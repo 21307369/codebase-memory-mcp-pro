@@ -450,7 +450,7 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
-    {"list_projects", "List projects", "List indexed projects with deterministic pagination",
+    {"list_projects", "List projects", "List indexed projects with deterministic pagination"
      "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\","
      "\"minimum\":0,\"default\":0},"
      "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":50},"
@@ -458,7 +458,7 @@ static const tool_def_t TOOLS[] = {
      "\"description\":\"Include branch, node/edge counts and database size. Slower.\"},"
      "\"metadata_only\":{\"type\":\"boolean\",\"description\":\"Deprecated compatibility "
      "alias for include_details=false.\"}}}"},
-    {"delete_project", "Delete project", "Delete a project from the index",
+    {"delete_project", "Delete project", "Delete a project from the index"
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
 

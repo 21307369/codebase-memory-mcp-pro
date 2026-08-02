@@ -4348,7 +4348,6 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         cbm_node_t *extra_nodes = NULL;
         int extra_count = 0;
         scan_pattern_nodes(store, project, &patn->nodes[0], &extra_nodes, &extra_count);
-        int rc = 0;
         if (patn->rel_count == 0) {
             cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
         } else {

@@ -325,7 +325,7 @@ static int init_schema(cbm_store_t *s) {
      * Contentless (content='') means FTS5 stores only the inverted index,
      * not a copy of the source text — required for camelCase tokenization
      * because we feed it `cbm_camel_split(name)` at insert time but want
-     * queries to match against the split tokens, not the original.
+     * queries to match against the split tokens, not the original. */
     /* Schema-compat probe (#768): DBs created before the local_name_gen
      * discriminator still enforce UNIQUE(source_id,target_id,type) and lack
      * the column — the widened upsert in cbm_store_insert_edge can neither
