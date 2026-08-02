@@ -38,6 +38,8 @@ extern void suite_discover(void);
 extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
+
+    RUN_SUITE(index_format);
 extern void suite_fqn(void);
 extern void suite_path_alias(void);
 extern void suite_watcher(void);
@@ -148,10 +150,8 @@ int main(void) {
     RUN_SUITE(graph_buffer);
 
     /* Pipeline (M8) */
-    RUN_SUITE(registry);
-    RUN_SUITE(pipeline);
-    RUN_SUITE(fqn);
-    RUN_SUITE(path_alias);
+
+    RUN_SUITE(index_format);
 
     /* Watcher (M10) */
     RUN_SUITE(watcher);

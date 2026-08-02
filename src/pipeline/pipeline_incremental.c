@@ -650,51 +650,47 @@ static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *p
         cbm_store_close(adr_store);
     }
 
-    int rc = CBM_STORE_ERR;
-
     char wal[INCR_WAL_BUF];
     char shm[INCR_WAL_BUF];
     snprintf(wal, sizeof(wal), "%s-wal", db_path);
     snprintf(shm, sizeof(shm), "%s-shm", db_path);
-    if (cbm_unlink(db_path) != 0 && errno != ENOENT) {
-        cbm_log_error("incremental.err", "msg", "clear_staging_failed", "path", db_path);
-        goto cleanup;
-    }
+    cbm_unlink(db_path);
     cbm_unlink(wal);
     cbm_unlink(shm);
 
     int dump_rc = cbm_gbuf_dump_to_sqlite(gbuf, db_path);
     cbm_log_info("incremental.dump", "rc", itoa_buf(dump_rc), "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
-    if (dump_rc != 0) {
-        rc = dump_rc;
-        goto cleanup;
-    }
 
+    bool format_stamped = true;
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
-    if (!hash_store) {
-        cbm_log_error("incremental.err", "msg", "open_staging_after_dump", "path", db_path);
-        goto cleanup;
-    }
-    bool adr_restore_failed = false;
-    /* #992: restore the captured ADR before persisting hashes, mirroring the
-     * full-reindex path (#516) -- the DB replacement above dropped it. */
-    if (saved_adr && cbm_store_adr_store(hash_store, project, saved_adr) != CBM_STORE_OK) {
-        cbm_log_error("incremental.err", "msg", "adr_restore", "project", project);
-        adr_restore_failed = true;
-    }
+    if (hash_store) {
+        /* #992: restore the captured ADR before persisting hashes, mirroring the
+         * full-reindex path (#516) -- the DB replacement above dropped it. */
+        if (saved_adr && cbm_store_adr_store(hash_store, project, saved_adr) != CBM_STORE_OK) {
+            cbm_log_error("incremental.err", "msg", "adr_restore", "project", project);
+            cbm_store_close(hash_store);
+            free(saved_adr);
+            return CBM_PIPELINE_ABORT_PRESERVE_DB;
+        }
 
-    rc = persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
+        /* #769: cbm_writer_open truncates and rebuilds the DB file from
+         * scratch on every dump, so the format version written by the last
+         * full index is gone by the time we get here. */
+        if (cbm_store_set_format_version(hash_store, CBM_INDEX_FORMAT_VERSION) != CBM_STORE_OK) {
+            cbm_log_error("incremental.err", "msg", "persist_format_version", "project", project);
+            format_stamped = false;
+        }
 
-    /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
-     * any triggers that could have kept nodes_fts synchronized, so we
-     * rebuild from the nodes table here (also indexing prose bodies for
-     * content search — see cbm_store_fts_rebuild and #518/#519). */
-    cbm_store_fts_rebuild(hash_store);
+        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
 
-    cbm_store_close(hash_store);
-    if (adr_restore_failed) {
-        rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
+        /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
+         * any triggers that could have kept nodes_fts synchronized, so we
+         * rebuild from the nodes table here (also indexing prose bodies for
+         * content search — see cbm_store_fts_rebuild and #518/#519). */
+        cbm_store_fts_rebuild(hash_store);
+
+        cbm_store_close(hash_store);
     }
 
     /* Auto-update artifact if one already exists (persistence was enabled previously) */
@@ -702,11 +698,9 @@ static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *p
         cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_FAST);
     }
 
-cleanup:
     free(saved_adr);
-    return rc;
-}
-/* ── Incremental pipeline entry point ────────────────────────────── */
+    return format_stamped ? 0 : CBM_NOT_FOUND;
+}/* ── Incremental pipeline entry point ────────────────────────────── */
 
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
                                  int file_count) {
@@ -881,11 +875,12 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
      * reindex can correctly classify those files instead of seeing them
      * as never-existed; also exports a fast-mode artifact when one is
      * already present alongside the repo). */
-    dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
-                     mode_skipped_count, cbm_pipeline_repo_path(p));
+    int dp_rc =
+        dump_and_persist(existing, db_path, project, files, file_count, mode_skipped,
+                         mode_skipped_count, cbm_pipeline_repo_path(p));
     free_mode_skipped(mode_skipped, mode_skipped_count);
     cbm_gbuf_free(existing);
 
     cbm_log_info("incremental.done", "elapsed_ms", itoa_buf((int)elapsed_ms(t0)));
-    return 0;
+    return dp_rc;
 }

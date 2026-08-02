@@ -779,17 +779,30 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     if (check_store && cbm_store_check_integrity(check_store)) {
         cbm_file_hash_t *hashes = NULL;
         int hash_count = 0;
+        int fmt = 0;
+
         cbm_store_get_file_hashes(check_store, p->project_name, &hashes, &hash_count);
         cbm_store_free_file_hashes(hashes, hash_count);
+        cbm_store_get_format_version(check_store, &fmt);
+
+        bool format_stale = (fmt != CBM_INDEX_FORMAT_VERSION);
         cbm_store_close(check_store);
-        if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
+
+        if (format_stale) {
+            if (hash_count > 0) {
+                char stored_buf[CBM_SZ_32];
+                snprintf(stored_buf, sizeof(stored_buf), "%d", fmt);
+                cbm_log_info("pipeline.route", "path", "format_change_reindex", "stored_format",
+                             stored_buf);
+            }
+            /* fall through to delete + full rebuild */
+        } else if (hash_count > 0 && file_count <= hash_count + (hash_count / PAIR_LEN)) {
             cbm_log_info("pipeline.route", "path", "incremental", "stored_hashes",
                          itoa_buf(hash_count));
             int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count);
             free(db_path);
             return rc;
-        }
-        if (hash_count > 0) {
+        } else if (hash_count > 0) {
             cbm_log_info("pipeline.route", "path", "mode_change_reindex", "stored_hashes",
                          itoa_buf(hash_count), "discovered", itoa_buf(file_count));
         }
@@ -864,8 +877,18 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     }
     cbm_log_info("pass.timing", "pass", "dump", "elapsed_ms", itoa_buf((int)elapsed_ms(*t)));
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
+    bool format_stamped = true;
     if (hash_store) {
-        cbm_store_delete_file_hashes(hash_store, p->project_name);
+        bool hash_records_complete = true;
+        if (cbm_store_set_format_version(hash_store, CBM_INDEX_FORMAT_VERSION) != CBM_STORE_OK) {
+            cbm_log_error("pipeline.err", "phase", "persist_format_version");
+            format_stamped = false;
+        }
+        CBM_PROF_START(t_delhash);
+        if (cbm_store_delete_file_hashes(hash_store, p->project_name) != CBM_STORE_OK) {
+            hash_records_complete = false;
+        }
+        CBM_PROF_END("persist", "2_delete_file_hashes", t_delhash);
 
         /* Restore the ADR captured before the dump. Issue #516. */
         if (p->saved_adr) {
@@ -891,6 +914,9 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     free(p->saved_adr);
     p->saved_adr = NULL;
 
+    if (!format_stamped) {
+        return CBM_NOT_FOUND;
+    }
     /* Export persistent artifact if enabled */
     if (p->persistence) {
         cbm_artifact_export(db_path, p->repo_path, p->project_name, CBM_ARTIFACT_BEST);
