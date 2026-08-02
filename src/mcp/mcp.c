@@ -5849,7 +5849,7 @@ static char *handle_explore(cbm_mcp_server_t *srv, const char *args) {
                 cbm_store_free_nodes(fnodes, fn);
             }
         }
- + same-file symbols\n\n");
+        expl_put(&md, "\n## Neighbors — 1-hop callees + same-file symbols\n\n");
         if (neigh_count == 0) {
             expl_put(&md, "> _(none)_\n");
         } else {
