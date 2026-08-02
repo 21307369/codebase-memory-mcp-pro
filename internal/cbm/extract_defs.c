@@ -2677,8 +2677,8 @@ static char *go_receiver_type_name(CBMArena *a, TSNode recv, const char *source)
 }
 static bool rust_def_is_test(const char *const *decorators);
 static const char *rust_cfg_qualified_name(CBMArena *a, const char *base_qn,
-static const char *qn_safe_segment(CBMArena *a, const char *name);
                                            const char *const *decorators);
+static const char *qn_safe_segment(CBMArena *a, const char *name);
 
 
 static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
