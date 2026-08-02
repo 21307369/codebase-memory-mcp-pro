@@ -652,8 +652,6 @@ static void handle_adr_save(cbm_http_conn_t *c, const cbm_http_req_t *req) {
 
 static char g_binary_path[1024] = {0};
 
-<<<<<<< ours
-=======
 static bool copy_path(char *out, size_t outsz, const char *path) {
     if (!out || outsz == 0 || !path || !path[0]) {
         return false;
@@ -759,7 +757,6 @@ bool cbm_http_server_resolve_binary_path(const char *argv0, char *out, size_t ou
     return copy_path(out, outsz, argv0);
 }
 
->>>>>>> theirs
 void cbm_http_server_set_binary_path(const char *path) {
     if (path) {
         snprintf(g_binary_path, sizeof(g_binary_path), "%s", path);

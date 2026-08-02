@@ -22,12 +22,9 @@ enum { PD_JSON_FIELD_OVERHEAD = 6 };
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
 #include "foundation/compat.h"
-<<<<<<< ours
-=======
 #include "foundation/compat_fs.h"
 #include "foundation/limits.h"
 #include "foundation/str_util.h"
->>>>>>> theirs
 #include "cbm.h"
 #include "simhash/minhash.h"
 #include "semantic/ast_profile.h"

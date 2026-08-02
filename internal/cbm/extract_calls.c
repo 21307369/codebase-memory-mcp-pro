@@ -1193,7 +1193,6 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
             call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
-=======
             /* Python attribute calls (prior_cp.get(...)): flag as method so weak
              * short-name resolution can be suppressed (G2 / WP-B C2), mirroring
              * the TS/JS receiver-aware guard above. Bare calls stay false. */
@@ -1205,7 +1204,6 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                     call.is_method = true;
                 }
             }
->>>>>>> theirs
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             if (!ts_node_is_null(args)) {
