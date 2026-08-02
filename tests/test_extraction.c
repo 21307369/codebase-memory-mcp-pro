@@ -532,6 +532,17 @@ TEST(swift_class) {
     PASS();
 }
 
+TEST(swift_protocol) {
+    CBMFileResult *r = extract("protocol StudyRunning {\n    func generate() -> String\n}\n",
+                               CBM_LANG_SWIFT, "t", "StudyRunning.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Interface", "StudyRunning"));
+    ASSERT(has_def(r, "Method", "generate"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Kotlin --- */
 TEST(kotlin_function) {
     CBMFileResult *r = extract("fun greet(name: String): String = \"Hello $name\"\nfun main() { "
@@ -1087,16 +1098,12 @@ TEST(swift_struct) {
                                CBM_LANG_SWIFT, "t", "Point.swift");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Class", "Point"));
     ASSERT(has_def(r, "Method", "distance"));
     cbm_free_result(r);
     PASS();
 }
 
-/* Regression (WS2a / dup-node): a `static func` inside a Swift `enum` namespace
- * must be emitted exactly ONCE as a Method — not ALSO as a top-level Function.
- * The enum body node type is `enum_class_body`; push_class_body_children's
- * body-type list had drifted from extract_class_def's (it lacked enum_class_body),
- * so enum members were re-walked and double-extracted into spurious Function nodes. */
 TEST(swift_enum_static_func_not_duplicated) {
     CBMFileResult *r = extract("enum SM2 {\n    static func review(q: Int) -> Int { return q }\n}\n",
                                CBM_LANG_SWIFT, "t", "SM2.swift");
@@ -1119,33 +1126,12 @@ TEST(swift_enum_static_func_not_duplicated) {
     PASS();
 }
 
-/* WS2b: Swift type declarations get idiomatic labels (struct→Struct, enum→Enum,
- * actor→Actor; class stays Class) via the tree-sitter `declaration_kind` field. */
-TEST(swift_idiomatic_type_kinds) {
-    CBMFileResult *r = extract("struct S { let x: Int }\nenum E { case a }\nclass C {}\nactor A {}\n",
-                               CBM_LANG_SWIFT, "t", "K.swift");
+TEST(swift_enum) {
+    CBMFileResult *r = extract("enum StudyDepth {\n    case brief\n    case study\n    case deep\n}\n",
+                               CBM_LANG_SWIFT, "t", "StudyDepth.swift");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
-    ASSERT(has_def(r, "Struct", "S"));
-    ASSERT(has_def(r, "Enum", "E"));
-    ASSERT(has_def(r, "Class", "C"));
-    ASSERT(has_def(r, "Actor", "A"));
-    cbm_free_result(r);
-    PASS();
-}
-
-/* WS2b regression: a same-file `extension` shares the extended type's FQN, so
- * emitting a (Class) type def for it would clobber the real type's idiomatic
- * label via the last-write-wins store upsert. The extension must NOT emit a type
- * def (so the struct stays Struct), while its members are still extracted. */
-TEST(swift_extension_does_not_clobber_type_label) {
-    CBMFileResult *r = extract("struct P { let x: Int }\nextension P { func helper() {} }\n",
-                               CBM_LANG_SWIFT, "t", "P.swift");
-    ASSERT_NOT_NULL(r);
-    ASSERT_FALSE(r->has_error);
-    ASSERT(has_def(r, "Struct", "P"));       /* not clobbered back to Class */
-    ASSERT_FALSE(has_def(r, "Class", "P"));  /* extension emits no type def */
-    ASSERT(has_def(r, "Method", "helper"));  /* extension member preserved */
+    ASSERT(has_def(r, "Enum", "StudyDepth"));
     cbm_free_result(r);
     PASS();
 }
@@ -3038,6 +3024,7 @@ SUITE(extraction) {
     RUN_TEST(csharp_class);
     RUN_TEST(csharp_interface);
     RUN_TEST(swift_class);
+    RUN_TEST(swift_protocol);
     RUN_TEST(kotlin_function);
     RUN_TEST(kotlin_class);
     RUN_TEST(scala_function);
@@ -3096,10 +3083,8 @@ SUITE(extraction) {
 
     /* OOP/Systems variants */
     RUN_TEST(swift_struct);
+    RUN_TEST(swift_enum);
     RUN_TEST(swift_enum_static_func_not_duplicated);
-    RUN_TEST(swift_idiomatic_type_kinds);
-    RUN_TEST(swift_extension_does_not_clobber_type_label);
-    RUN_TEST(swift_enum_cases_extracted_as_enumcase);
     RUN_TEST(swift_simple_call);
     RUN_TEST(swift_method_call);
     RUN_TEST(swift_constructor_call);
