@@ -441,7 +441,10 @@ static const ext_entry_t EXT_TABLE[] = {
     /* Qt QML */
     {".qml", CBM_LANG_QML},
 
-    /* CFML / ColdFusion — .cfc components are script-dialect; .cfm are tag templates */
+    /* CFML / ColdFusion — .cfm are tag templates; .cfc components may be EITHER
+     * script-dialect (component { ... }) or tag-dialect (<cfcomponent> ...). The
+     * table default is script; tag-based .cfc are resolved by content in
+     * cbm_disambiguate_cfc(). */
     {".cfc", CBM_LANG_CFSCRIPT},
     {".cfm", CBM_LANG_CFML},
 

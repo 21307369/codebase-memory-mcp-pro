@@ -5973,6 +5973,20 @@ static const char *extract_config_module_description(CBMExtractCtx *ctx) {
     return NULL;
 }
 
+// Walk the tree for functions/classes/fields and module-level variables, WITHOUT
+// emitting the file-level Module node. Split out so embedded sub-trees (e.g. a
+// CFML <cfscript> block re-parsed with the cfscript grammar) can be walked for
+// definitions without minting a spurious Module per block. See
+// cbm_extract_embedded_defs().
+void cbm_extract_definitions_body(CBMExtractCtx *ctx) {
+    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+    if (!spec) {
+        return;
+    }
+    walk_defs(ctx, ctx->root, spec, 0);
+    extract_variables(ctx, ctx->root, spec);
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -5996,11 +6010,8 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.docstring = extract_config_module_description(ctx);
     cbm_defs_push(&ctx->result->defs, a, mod);
 
-    // Walk AST for function/class definitions
-    walk_defs(ctx, ctx->root, spec, 0);
-
-    // Extract module-level variables
-    extract_variables(ctx, ctx->root, spec);
+    // Walk AST for definitions + module-level variables
+    cbm_extract_definitions_body(ctx);
 }
 
 // ============================ dbt Jinja extraction ============================

@@ -296,6 +296,51 @@ TEST(extract_cfml_tag_issue38) {
     PASS();
 }
 
+/* --- CFML tag dialect: script functions inside a <cfscript> block of a tag
+ * component. The HTML-derived cfml grammar keeps the <cfscript> body as an
+ * opaque cf_script_content token, so these functions only surface once the
+ * block is re-parsed with the cfscript grammar (cbm_extract_embedded_defs).
+ * Also asserts the block-relative line numbers are remapped back to host-file
+ * lines, and that a leading <cfsetting> void tag (which cascades ERROR nodes in
+ * the cfml grammar) does not prevent recovery of the functions. --- */
+TEST(extract_cfml_embedded_cfscript_defs) {
+    /* Source layout (1-based lines): 1 <cfcomponent>, 2 <cfsetting>, 3 <cfscript>,
+     * 4 greet(), 7 addTwo(), 10 </cfscript>, 11 <cffunction tagPing>, 14 close. */
+    CBMFileResult *r = extract("<cfcomponent>\n"
+                               "<cfsetting requesttimeout=\"10\">\n"
+                               "<cfscript>\n"
+                               "    public string function greet(string who) {\n"
+                               "        return \"hi \" & who;\n"
+                               "    }\n"
+                               "    private numeric function addTwo(numeric a) {\n"
+                               "        return a + 2;\n"
+                               "    }\n"
+                               "</cfscript>\n"
+                               "<cffunction name=\"tagPing\" returntype=\"string\">\n"
+                               "    <cfreturn \"pong\">\n"
+                               "</cffunction>\n"
+                               "</cfcomponent>\n",
+                               CBM_LANG_CFML, "app", "Service.cfc");
+    ASSERT_NOT_NULL(r);
+    /* Script functions inside <cfscript> are recovered ... */
+    ASSERT(has_def(r, "Function", "greet"));
+    ASSERT(has_def(r, "Function", "addTwo"));
+    /* ... alongside the tag-dialect <cffunction> in the same component. */
+    ASSERT(has_def(r, "Function", "tagPing"));
+    /* Line numbers are remapped from block-relative back to host-file lines. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (strcmp(d->label, "Function") == 0 && strcmp(d->name, "greet") == 0) {
+            ASSERT(d->start_line == 4);
+        }
+        if (strcmp(d->label, "Function") == 0 && strcmp(d->name, "addTwo") == 0) {
+            ASSERT(d->start_line == 7);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Helm / Go template: named templates + include calls (#338) --- */
 TEST(extract_helm_templates_issue338) {
     CBMFileResult *r = extract("{{- define \"chart.fullname\" -}}\n"
@@ -3103,7 +3148,6 @@ TEST(extract_ts_template_string_url_issue1006) {
     PASS();
 }
 
-
 /* Reproduce-first: Java module QN must derive from the CONTAINING DIRECTORY, not
  * the filename stem, so a top-level class `Outer` in `Outer.java` is `t.Outer`,
  * NOT the doubled `t.Outer.Outer`. The nested method def QN must also equal the
@@ -4749,6 +4793,7 @@ SUITE(extraction) {
     RUN_TEST(extract_qml_issue42);
     RUN_TEST(extract_cfscript_issue38);
     RUN_TEST(extract_cfml_tag_issue38);
+    RUN_TEST(extract_cfml_embedded_cfscript_defs);
     RUN_TEST(extract_helm_templates_issue338);
     RUN_TEST(extract_helm_values_toplevel_issue338);
 

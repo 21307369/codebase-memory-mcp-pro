@@ -284,6 +284,16 @@ static const char *cfml_branch_types[] = {
     "cf_if_tag",     "cf_elseif_tag",   "cf_else_tag",      "if_statement",
     "for_statement", "while_statement", "switch_statement", NULL};
 static const char *cfml_module_types[] = {"program", "component_file", NULL};
+// The cfml (HTML-derived) grammar keeps the body of a <cfscript> block as an
+// opaque cf_script_content token — it does NOT parse the script-dialect
+// functions inside. Re-parse that slice with the cfscript grammar so those
+// functions become real definitions. (Contrast the comment above: embedded
+// <cfscript> functions only "appear as function_declaration" once re-parsed
+// here; in the raw cfml tree they are unparsed text.)
+static const CBMEmbeddedLangSpec cfml_embedded_defs[] = {
+    {"cf_script_tag", "cf_script_content", CBM_LANG_CFSCRIPT},
+    {NULL, NULL, 0},
+};
 
 // ==================== RUST ====================
 static const char *rust_func_types[] = {"function_item", "function_signature_item",
@@ -2006,7 +2016,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_CFML] = {CBM_LANG_CFML, cfml_func_types, empty_types, empty_types, cfml_module_types,
                        cfml_call_types, empty_types, empty_types, cfml_branch_types, empty_types,
                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_cfml,
-                       NULL},
+                       NULL, cfml_embedded_defs},
 
     // CBM_LANG_GLEAM
     [CBM_LANG_GLEAM] = {CBM_LANG_GLEAM, gleam_func_types, gleam_class_types, gleam_field_types,

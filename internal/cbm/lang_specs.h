@@ -39,6 +39,12 @@ typedef struct {
     // no embedded content to re-parse). The terminator is an entry whose
     // script_node_type is NULL.
     const CBMEmbeddedLangSpec *embedded_imports;
+    // Like embedded_imports, but the inner AST is walked for DEFINITIONS (not
+    // imports). Used where a host grammar leaves a script block unparsed yet the
+    // block defines functions — e.g. CFML tag components whose <cfscript> body
+    // (cf_script_tag -> cf_script_content) holds script-dialect functions the
+    // HTML-derived cfml grammar keeps as opaque content. NULL if none.
+    const CBMEmbeddedLangSpec *embedded_defs;
 } CBMLangSpec;
 
 // Get the language spec for a given language. Returns NULL for unsupported.

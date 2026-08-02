@@ -317,6 +317,9 @@ static void emit_classified_edge(cbm_pipeline_ctx_t *ctx, const CBMCall *call,
         cbm_gbuf_insert_edge(ctx->gbuf, source->id, target->id, "CONFIGURES", props);
         return;
     }
+    if (suppress_plain_calls) {
+        return; /* weak TS/JS or Python same-name match (#606 / G2) */
+    }
     char esc_c2[CBM_SZ_256];
     cbm_json_escape(esc_c2, sizeof(esc_c2), call->callee_name);
     char props[CBM_SZ_512];
@@ -401,10 +404,14 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
      * defer to emit_classified_edge and suppress ONLY the plain-CALLS
      * fall-through, so every service edge stays main-identical. res.strategy may
      * be lsp_* here; the helper's explicit drop-list leaves lsp_* untouched. */
-    bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-    bool drop_plain_call =
-        cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy);
+    bool is_tsjs =
+        lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+    bool tsjs_drop_plain_call =
+        cbm_tsjs_suppress_weak_method_match(is_tsjs, call->is_method, res.strategy);
+    /* Python weak same-name suppression (G2): member calls + bare get/run/execute. */
+    bool py_drop_plain_call = cbm_python_suppress_weak_generic_call(
+        lang == CBM_LANG_PYTHON, call->is_method, call->callee_name, res.strategy);
+    bool drop_plain_call = tsjs_drop_plain_call || py_drop_plain_call;
 
     /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
      * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library

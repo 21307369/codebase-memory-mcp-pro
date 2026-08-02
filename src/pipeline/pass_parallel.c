@@ -1844,10 +1844,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
          * construction. res.strategy may carry an lsp_* value here (LSP-resolved
          * calls keep res through this point); the helper's EXPLICIT drop-list
          * leaves lsp_ts_method / lsp_cross untouched. See #606 direction. */
-        bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
-                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
-        bool drop_plain_call =
-            cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy);
+        bool is_tsjs =
+            lang == CBM_LANG_JAVASCRIPT || lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+        bool tsjs_drop_plain_call =
+            cbm_tsjs_suppress_weak_method_match(is_tsjs, call->is_method, res.strategy);
+        bool py_drop_plain_call = cbm_python_suppress_weak_generic_call(
+            lang == CBM_LANG_PYTHON, call->is_method, call->callee_name, res.strategy);
+        bool drop_plain_call = tsjs_drop_plain_call || py_drop_plain_call;
 
         /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
          * service signal lives in the callee_name. The registry can mis-resolve
