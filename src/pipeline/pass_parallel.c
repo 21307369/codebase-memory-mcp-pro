@@ -828,7 +828,8 @@ static int register_and_link_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *d
         strcmp(def->label, "Actor") == 0 ||
         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
         /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
-        strcmp(def->label, "EnumCase") == 0) {
+        strcmp(def->label, "EnumCase") == 0 ||
+        strcmp(def->label, "Table") == 0 || strcmp(def->label, "View") == 0) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
         (*reg_entries)++;
     }

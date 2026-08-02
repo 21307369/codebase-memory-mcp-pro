@@ -303,13 +303,14 @@ static void process_def(cbm_pipeline_ctx_t *ctx, const CBMDefinition *def, const
     if (node_id > 0 && def->label &&
         (strcmp(def->label, "Function") == 0 || strcmp(def->label, "Method") == 0 ||
          strcmp(def->label, "Class") == 0 || strcmp(def->label, "Interface") == 0 ||
-         /* Swift idiomatic type kinds — must be registry symbols so CALLS to enum/
-          * struct statics (e.g. SM2.review) and INHERITS/conformance resolve. (WS2b) */
-         strcmp(def->label, "Struct") == 0 || strcmp(def->label, "Enum") == 0 ||
-         strcmp(def->label, "Actor") == 0 ||
-         strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
-         /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
-         strcmp(def->label, "EnumCase") == 0)) {
+        /* Swift idiomatic type kinds — must be registry symbols so CALLS to enum/
+         * struct statics (e.g. SM2.review) and INHERITS/conformance resolve. (WS2b) */
+        strcmp(def->label, "Struct") == 0 || strcmp(def->label, "Enum") == 0 ||
+        strcmp(def->label, "Actor") == 0 ||
+        strcmp(def->label, "Variable") == 0 || strcmp(def->label, "Field") == 0 ||
+        /* Swift/Kotlin enum cases — registered so `Type.case` READS resolve (M2-c). */
+        strcmp(def->label, "EnumCase") == 0 ||
+        strcmp(def->label, "Table") == 0 || strcmp(def->label, "View") == 0)) {
         cbm_registry_add(ctx->registry, def->name, def->qualified_name, def->label);
     }
     char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
