@@ -2675,6 +2675,10 @@ static char *go_receiver_type_name(CBMArena *a, TSNode recv, const char *source)
     }
     return NULL;
 }
+static bool rust_def_is_test(const char *const *decorators);
+static const char *rust_cfg_qualified_name(CBMArena *a, const char *base_qn,
+                                           const char *const *decorators);
+
 
 static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec) {
     CBMArena *a = ctx->arena;
@@ -2775,10 +2779,6 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         def.is_test = rust_def_is_test(def.decorators);
     }
 
-    // C++/CUDA: GoogleTest macros are test functions (#1266).
-    if (is_gtest) {
-        def.is_test = true;
-    }
 
     // A function/method defined in a file cbm treats as a test file is itself
     // a test, regardless of its own name (tests/helpers/fixtures.c has none
@@ -2815,10 +2815,56 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
+static bool rust_def_is_test(const char *const *decorators) {
+    if (!decorators) {
+        return false;
+    }
+    for (int i = 0; decorators[i]; i++) {
+        const char *d = decorators[i];
+        /* Path-qualified async/param test macros (substring match, robust to the
+         * optional argument list and the surrounding #[ ]). */
+        if (strstr(d, "tokio::test") || strstr(d, "async_std::test") ||
+            strstr(d, "actix_rt::test") || strstr(d, "test_case::case")) {
+            return true;
+        }
+        /* Bare #[test] / #[test(...)]: match the bracketed path exactly so we do
+         * NOT match the unrelated #[test_case::case] (handled above) or a
+         * hypothetical #[test_crate]. */
+        if (strstr(d, "#[test]") || strstr(d, "#[test(")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *rust_cfg_qualified_name(CBMArena *a, const char *base_qn,
+                                           const char *const *decorators) {
+    if (!decorators) {
+        return base_qn;
+    }
+    for (int i = 0; decorators[i]; i++) {
+        const char *cfg = strstr(decorators[i], "cfg(");
+        if (!cfg) {
+            continue;
+        }
+        /* Build a compact predicate suffix from the cfg(...) text, dropping
+         * whitespace and quotes so the QN stays readable and stable. */
+        char buf[CBM_SZ_256];
+        size_t bi = 0;
+        for (const char *p = cfg; *p && bi + 1 < sizeof(buf); p++) {
+            if (*p == ' ' || *p == '\t' || *p == '"' || *p == '\'') {
+                continue;
+            }
+            buf[bi++] = *p;
+        }
+        buf[bi] = '\0';
+        return cbm_arena_sprintf(a, "%s#%s", base_qn, buf);
+    }
+    return base_qn;
+}
+
 // --- Class definition extraction ---
 
-// Push a simple class definition (used by config language extractors).
-static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, const char *label) {
 // Replace each run of whitespace in `name` with a single '-' so the value is a
 // well-formed QN segment. Markdown headings (e.g. "Codebase Memory") legitimately
 // contain spaces; embedding them verbatim in a QN makes it malformed. Returns the
@@ -3150,7 +3196,7 @@ static bool extract_sql_ddl_class_def(CBMExtractCtx *ctx, TSNode node, const cha
     if (!name || !name[0]) {
         return false;
     }
-    push_simple_class_def(ctx, node, name, label);
+    push_simple_class_def(ctx, node, name, label, NULL);
     const char *qn = cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, name);
     collect_sql_relation_usages(ctx, node, qn);
     return true;
@@ -3882,7 +3928,7 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
                 if (ts_node_is_null(nn)) {
                     continue;
                 }
-                push_method_def(ctx, dchild, class_node, class_qn, spec, nn);
+                push_method_def(ctx, dchild, class_qn, spec, nn);
             }
             continue;
         }
