@@ -6113,6 +6113,305 @@ TEST(pipeline_complexity_transitive_loop_depth) {
     PASS();
 }
 
+/* Regression for #334: the plausibility gate compares committed (extracted)
+ * node count against persisted rows. committed_nodes must be captured BEFORE
+ * cbm_gbuf_dump_to_sqlite frees the gbuf node index — otherwise it reads 0 and
+ * the gate is silently inert. Drives the real pipeline (not a synthetic count)
+ * and asserts committed_nodes is populated and matches what was persisted. */
+TEST(pipeline_committed_counts_match_persisted) {
+    if (setup_test_repo() != 0) {
+        FAIL("failed to create temp dir");
+    }
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/committed_test.db", g_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    int rc = cbm_pipeline_run(p);
+    ASSERT_EQ(rc, 0);
+
+    int committed_nodes = -1;
+    int committed_edges = -1;
+    cbm_pipeline_get_committed_counts(p, &committed_nodes, &committed_edges);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+    int persisted_nodes = cbm_store_count_nodes(s, project);
+    cbm_store_close(s);
+
+    /* The bug captured committed_nodes after the node index was freed → 0. */
+    ASSERT_GT(committed_nodes, 0);
+    /* A faithful full dump persists exactly what it committed. */
+    ASSERT_EQ(committed_nodes, persisted_nodes);
+    /* The gate must NOT flag a healthy full index as degraded. */
+    ASSERT_FALSE(cbm_dump_verify_is_degraded(committed_nodes, persisted_nodes,
+                                             CBM_DUMP_VERIFY_DEFAULT_RATIO,
+                                             CBM_DUMP_VERIFY_MIN_FLOOR));
+
+    cbm_pipeline_free(p);
+    teardown_test_repo();
+    PASS();
+}
+
+/* Reproduce-first (perf, linux-kernel finding): the extraction back-pressure
+ * gate must stop re-paying the full collect+nap tax on every file pull once a
+ * full nap cycle has failed to reclaim under budget. With CBM_MEM_BUDGET_MB=1
+ * the test process RSS is permanently over budget and NOTHING napping can
+ * change that (the resident floor IS the process) — napping is provably futile.
+ * OLD behavior: one full 40-spin nap cycle per pulled file (kernel index: ~63k
+ * pulls × ~120 ms ÷ 12 workers ≈ 390 s of idle workers at 79% avg CPU).
+ * FIXED: the first futile cycle flips a shared flag; later pulls proceed with
+ * the designed soft overshoot. Cycle count then can't exceed one cycle per
+ * worker (workers already inside the gate when the flag flips) plus re-probes.
+ * Four workers keep this semantic regression deterministic under TSan while
+ * still exercising the parallel path. RED on the unfixed gate: cycles == file
+ * count (64) > workers+2.
+ * The counter (cbm_pp_bp_nap_cycles) makes this deterministic — no timing.
+ *
+ * The gate lives ONLY in the parallel extract path, so the fixture MUST exceed
+ * MIN_FILES_FOR_PARALLEL (50) — else the run routes sequential, the gate never
+ * fires, and the test would pass vacuously (cycles==0). The engagement assert
+ * below (cycles >= 1) is a hard guard against that regressing silently. */
+TEST(pipeline_backpressure_futile_nap_disengages) {
+    /* 64 tiny files: > MIN_FILES_FOR_PARALLEL (50) so the parallel path (and its
+     * back-pressure gate) actually runs; old-code cycles (~64) >> the bound. */
+    snprintf(g_tmpdir, sizeof(g_tmpdir), "/tmp/cbm_test_XXXXXX");
+    if (!cbm_mkdtemp(g_tmpdir)) {
+        FAIL("failed to create temp dir");
+    }
+    for (int i = 0; i < 64; i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/f%02d.go", g_tmpdir, i);
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            FAIL("failed to create fixture file");
+        }
+        fprintf(f, "package main\n\nfunc F%02d() int {\n\treturn %d\n}\n", i, i);
+        fclose(f);
+    }
+
+    /* 1 MB budget: over-budget on every pull, unreclaimable by napping.
+     * Set via the test hook, NOT setenv + cbm_mem_init: the init-once guard
+     * makes any re-init keep whatever budget the FIRST in-process init
+     * computed. The old env dance either failed to apply the 1 MB budget
+     * (some earlier test's init won the guard) or applied it permanently
+     * (this test's init won) — the "restore" re-init was then a silent
+     * no-op and the 1 MB budget leaked into every later budget consumer
+     * in the runner (mem_over_budget_low_rss went red suite-order-wide). */
+    size_t saved_budget = cbm_mem_budget();
+    cbm_mem_set_budget_for_tests((size_t)1024 * 1024);
+    ASSERT_TRUE(cbm_mem_budget() > 0);
+    ASSERT_TRUE(cbm_mem_over_budget());
+
+    cbm_pp_bp_nap_cycles_reset();
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/backpressure.db", g_tmpdir);
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+
+    /* This test measures the shared futility latch, not allocator scalability.
+     * High-core TSan runs can turn unrelated slab bookkeeping into an 18-way
+     * lock convoy. Four workers preserve the parallel semantic while making its
+     * bound host-independent. cbm_pipeline_run joins its workers before return,
+     * so restoring the process environment after freeing p cannot race them. */
+    enum { TEST_WORKERS = 4 };
+    const char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    if (old_workers && !saved_workers) {
+        cbm_mem_set_budget_for_tests(saved_budget);
+        cbm_pipeline_free(p);
+        teardown_test_repo();
+        FAIL("failed to save CBM_WORKERS");
+    }
+    if (cbm_setenv("CBM_WORKERS", "4", 1) != 0) {
+        free(saved_workers);
+        cbm_mem_set_budget_for_tests(saved_budget);
+        cbm_pipeline_free(p);
+        teardown_test_repo();
+        FAIL("failed to set CBM_WORKERS");
+    }
+
+    int rc = cbm_pipeline_run(p);
+    long cycles = cbm_pp_bp_nap_cycles();
+
+    /* Restore the caller-visible budget BEFORE asserting. */
+    cbm_mem_set_budget_for_tests(saved_budget);
+    cbm_pipeline_free(p);
+    int restore_workers_rc =
+        saved_workers ? cbm_setenv("CBM_WORKERS", saved_workers, 1) : cbm_unsetenv("CBM_WORKERS");
+    free(saved_workers);
+    teardown_test_repo();
+
+    ASSERT_EQ(restore_workers_rc, 0);
+    ASSERT_EQ(rc, 0);
+    /* Engagement guard (anti-vacuous): the gate must have actually run — the
+     * parallel path taken and the 1 MB budget exceeded on every pull. cycles==0
+     * means the fixture routed sequential (or the gate was compiled out) and
+     * this test proved NOTHING; fail loudly rather than pass vacuously. */
+    if (cycles < 1) {
+        FAIL("back-pressure gate never engaged (cycles==0) — fixture routed sequential?");
+    }
+    /* Futile napping must disengage: at most one in-flight cycle per worker
+     * plus a small margin, never one per file (64). */
+    long bound = TEST_WORKERS + 2;
+    if (cycles > bound) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "nap cycles %ld > bound %ld (gate re-paid per pull)", cycles,
+                 bound);
+        FAIL(msg);
+    }
+    PASS();
+}
+
+/* TS cross-registry test hooks (ts_lsp.c) — extern to avoid pulling the
+ * tree-sitter-typed ts_lsp.h into this store-level test. */
+extern long cbm_ts_full_registry_builds(void);
+extern void cbm_ts_full_registry_builds_reset(void);
+
+/* Reproduce-first (ms-typescript finding, 2026-07-07): the SEQUENTIAL
+ * cross-LSP driver must resolve TS files through the SHARED prebuilt
+ * registry, never a full per-file build. cbm_run_ts_lsp_cross registers
+ * stdlib + EVERY cross-file def + finalizes once PER FILE — O(files x defs).
+ * On an 81k-file TS corpus that ground one core for hours (74% of stack
+ * samples inside build_qn_index), and when the supervisor's quiet-timeout
+ * killed the crawl mid-pass, the stale extraction marker blamed innocent
+ * files, quarantining four of them one 15-minute retry at a time.
+ *
+ * The fixture stays UNDER MIN_FILES_FOR_PARALLEL (50) so the pipeline
+ * routes through the sequential driver — the path that lacked the
+ * shared-registry prepare.
+ * RED on the unfixed driver: full builds == TS file count (40).
+ * GREEN: full builds == 0 AND the cross-file TS call still resolves
+ * (quality guard — the shared path must not lose the edge). */
+TEST(pipeline_seq_ts_cross_uses_shared_registry) {
+    snprintf(g_tmpdir, sizeof(g_tmpdir), "/tmp/cbm_test_XXXXXX");
+    if (!cbm_mkdtemp(g_tmpdir)) {
+        FAIL("failed to create temp dir");
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/shared.ts", g_tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        FAIL("failed to create fixture file");
+    }
+    fputs("export function sharedHelper(): number {\n  return 42;\n}\n", f);
+    fclose(f);
+    for (int i = 0; i < 39; i++) {
+        snprintf(path, sizeof(path), "%s/caller%02d.ts", g_tmpdir, i);
+        f = fopen(path, "w");
+        if (!f) {
+            FAIL("failed to create fixture file");
+        }
+        fprintf(f,
+                "import { sharedHelper } from \"./shared\";\n"
+                "export function caller%02d(): number {\n  return sharedHelper();\n}\n",
+                i);
+        fclose(f);
+    }
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/seqts.db", g_tmpdir);
+    cbm_ts_full_registry_builds_reset();
+    cbm_pipeline_t *p = cbm_pipeline_new(g_tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    int rc = cbm_pipeline_run(p);
+    long builds = cbm_ts_full_registry_builds();
+
+    /* Quality guard FIRST: the cross-file call must resolve either way. */
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    bool linked = false;
+    if (s) {
+        linked =
+            cross_file_call_exists(s, cbm_pipeline_project_name(p), "caller00", "sharedHelper");
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    teardown_test_repo();
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(linked);
+    /* The point: ZERO full per-file registry builds on the sequential path. */
+    ASSERT_EQ(builds, 0);
+    PASS();
+}
+
+TEST(pipeline_ensemble_routing_routes_to_edges) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_ens_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("failed to create temp dir");
+
+    char path[512];
+
+    /* Production class with two items */
+    snprintf(path, sizeof(path), "%s/MyProduction.cls", tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        th_rmtree(tmpdir);
+        FAIL("fopen production");
+    }
+    fprintf(f, "Class MyApp.MyProduction Extends Ens.Production\n"
+               "{\n"
+               "XData ProductionDefinition\n"
+               "{\n"
+               "<Production Name=\"MyApp.MyProduction\">\n"
+               "  <Item Name=\"MyService\" ClassName=\"MyApp.MyService\" Enabled=\"true\">\n"
+               "  </Item>\n"
+               "  <Item Name=\"MyOperation\" ClassName=\"MyApp.MyOperation\" Enabled=\"true\">\n"
+               "  </Item>\n"
+               "</Production>\n"
+               "}\n"
+               "}\n");
+    fclose(f);
+
+    /* Service class with OnProcessInput that routes to MyOperation via literal */
+    snprintf(path, sizeof(path), "%s/MyService.cls", tmpdir);
+    f = fopen(path, "w");
+    if (!f) {
+        th_rmtree(tmpdir);
+        FAIL("fopen service");
+    }
+    fprintf(f, "Class MyApp.MyService Extends Ens.BusinessService\n"
+               "{\n"
+               "Method OnProcessInput(pRequest As %%Library.Object,"
+               " Output pResponse As %%Library.Object) As %%Status\n"
+               "{\n"
+               "    Do ..SendRequestSync(\"MyOperation\", pRequest, .pResponse)\n"
+               "    Quit $$$OK\n"
+               "}\n"
+               "}\n");
+    fclose(f);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/ens.db", tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmpdir, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+    const char *project = cbm_pipeline_project_name(p);
+
+    /* EnsembleItem nodes emitted for both production items */
+    cbm_node_t *items = NULL;
+    int item_count = 0;
+    cbm_store_find_nodes_by_label(s, project, "EnsembleItem", &items, &item_count);
+    ASSERT_GTE(item_count, 2);
+    cbm_store_free_nodes(items, item_count);
+
+    /* At least one ROUTES_TO edge from SendRequestSync literal match */
+    int routes = cbm_store_count_edges_by_type(s, project, "ROUTES_TO");
+    ASSERT_GTE(routes, 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 SUITE(pipeline) {
     /* Index lock */
     RUN_TEST(pipeline_lock_try_acquire);
@@ -6374,4 +6673,6 @@ SUITE(pipeline) {
     /* Project name edge cases */
     RUN_TEST(project_name_special_chars);
     RUN_TEST(project_name_trailing_slash);
+    /* Ensemble routing pass */
+    RUN_TEST(pipeline_ensemble_routing_routes_to_edges);
 }
