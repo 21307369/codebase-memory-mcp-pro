@@ -990,9 +990,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
             format_stamped = false;
         }
         CBM_PROF_START(t_delhash);
-        if (cbm_store_delete_file_hashes(hash_store, p->project_name) != CBM_STORE_OK) {
-            hash_records_complete = false;
-        }
+        (void)cbm_store_delete_file_hashes(hash_store, p->project_name);
         CBM_PROF_END("persist", "2_delete_file_hashes", t_delhash);
 
         /* Restore the ADR captured before the dump. Issue #516. */

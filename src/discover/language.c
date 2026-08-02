@@ -9,6 +9,7 @@
 #include "discover/discover.h"
 #include "discover/userconfig.h"
 #include "cbm.h" // CBMLanguage, CBM_LANG_*
+#include "foundation/compat.h"
 
 #include "foundation/constants.h"
 

@@ -15,6 +15,7 @@ char *cbm_node_text(CBMArena *a, TSNode node, const char *source);
 const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *source);
 
 // Check if a string is a language keyword (should be skipped as callee/usage).
+bool cbm_label_is_type_like(const char *label);
 bool cbm_is_keyword(const char *name, CBMLanguage lang);
 
 // Classify a string literal as URL, config, or neither.
