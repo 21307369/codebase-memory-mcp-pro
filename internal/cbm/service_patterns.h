@@ -32,6 +32,20 @@ void cbm_service_patterns_init(void);
  * "project.venv.requests.api.get"). Import-alias transparent. */
 cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn);
 
+/* True for a bare, unqualified call to the native `fetch()` API. Deliberately
+ * NOT part of the substring tables above: those are matched unconditionally
+ * against the raw callee name before/regardless of registry resolution
+ * (the #523 external-library bypass), and "fetch" — unlike "axios" or
+ * "requests" — collides with a plausible local identifier. Callers must
+ * only consult this after registry resolution has come back empty, so a
+ * locally resolvable `function fetch(){}` / `const fetch = () => {}` is
+ * classified via its real resolved QN instead and never reaches this check. */
+bool cbm_service_pattern_is_global_fetch(const char *callee_name);
+
+/* True when a string literal is a plausible HTTP route for the given callee.
+ * Rejects filesystem paths and non-HTTP string consumers. */
+bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
+
 /* Per-worker TLS cache for cbm_service_pattern_match results. The
  * pattern matcher runs once per resolved CALL edge in emit_service_
  * edge — that's 6 pattern lists × ~30 patterns × strstr per call ≈
