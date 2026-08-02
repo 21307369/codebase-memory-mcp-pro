@@ -92,15 +92,12 @@ typedef struct {
     const char *ext;
 } fp_entry_t;
 
+/* Deterministic ordering for the qsort below (PR #1368). The fork's
+ * fp_entry_t has no qn field (upstream's does), so order by node_id —
+ * same determinism guarantee, no dangling field. */
 static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
     const fp_entry_t *a = pa;
     const fp_entry_t *b = pb;
-    const char *qa = a->qn ? a->qn : "";
-    const char *qb = b->qn ? b->qn : "";
-    int r = strcmp(qa, qb);
-    if (r != 0) {
-        return r;
-    }
     if (a->node_id != b->node_id) {
         return a->node_id < b->node_id ? -1 : 1;
     }
