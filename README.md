@@ -474,7 +474,7 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 | `get_code_snippet` | Read source code for a function by qualified name. |
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters, ADR. |
 | `search_code` | Grep-like text search within indexed project files. |
-| `manage_adr` | CRUD for Architecture Decision Records. |
+| `manage_adr` | CRUD for Architecture Decision Records (`get` / `update` replaces / `append` adds / `sections`). |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
 
 ## Graph Data Model
