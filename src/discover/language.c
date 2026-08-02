@@ -1019,7 +1019,7 @@ CBMLanguage cbm_language_from_shebang(const char *path) {
         return CBM_LANG_COUNT;
     }
 
-    FILE *f = cbm_fopen(path, "rb");
+    FILE *f = fopen(path, "rb");
     if (!f) {
         return CBM_LANG_COUNT; /* fail closed on read error */
     }
@@ -1214,7 +1214,7 @@ CBMLanguage cbm_disambiguate_cfc(const char *path) {
         return CBM_LANG_CFSCRIPT;
     }
 
-    FILE *f = cbm_fopen(path, "r");
+    FILE *f = fopen(path, "r");
     if (!f) {
         return CBM_LANG_CFSCRIPT;
     }

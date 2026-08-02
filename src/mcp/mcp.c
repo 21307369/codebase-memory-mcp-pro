@@ -2180,7 +2180,6 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         cbm_vector_result_t *vresults = NULL;
         int vcount = 0;
         bool sq_present = false;
-        int vtotal = 0;
         bool sq_type_error =
             run_semantic_query_core(args, store, project, limit, CBM_VECTOR_SEARCH_SIDECAR,
                                     &vresults, &vcount, NULL, &sq_present);

@@ -1,3 +1,4 @@
+#include "helpers.h"
 
 /*
  * registry.c — Function/Method/Class registry for call resolution.
