@@ -583,6 +583,7 @@ void cbm_channels_push(CBMChannelArray *arr, CBMArena *a, CBMChannel ch);
 // --- Sub-extractor entry points ---
 
 void cbm_extract_definitions(CBMExtractCtx *ctx);
+void cbm_extract_definitions_body(CBMExtractCtx *ctx);
 void cbm_extract_calls(CBMExtractCtx *ctx);
 void cbm_extract_dbt_jinja(CBMExtractCtx *ctx);
 void cbm_extract_imports(CBMExtractCtx *ctx);
