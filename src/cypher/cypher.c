@@ -2790,31 +2790,14 @@ static void scan_alternation_labels(cbm_store_t *store, const char *project, con
     free(copy);
 }
 
-static void scan_pattern_nodes(cbm_store_t *store, const char *project, int max_rows,
-                               cbm_node_pattern_t *first, cbm_node_t **out_nodes, int *out_count) {
+static void scan_pattern_nodes(cbm_store_t *store, const char *project, cbm_node_pattern_t *first,
+                               cbm_node_t **out_nodes, int *out_count) {
     if (first->label && strchr(first->label, '|')) {
         scan_alternation_labels(store, project, first->label, out_nodes, out_count);
     } else if (first->label) {
         cbm_store_find_nodes_by_label(store, project, first->label, out_nodes, out_count);
     } else {
-        cbm_search_params_t params = {.project = project,
-                                      .min_degree = CYP_FOUND_NONE,
-                                      .max_degree = CYP_FOUND_NONE,
-                                      .limit = max_rows * CYP_GROWTH_10};
-        cbm_search_output_t sout = {0};
-        cbm_store_search(store, &params, &sout);
-        *out_count = sout.count;
-        *out_nodes = malloc(sout.count * sizeof(cbm_node_t));
-        for (int i = 0; i < sout.count; i++) {
-            (*out_nodes)[i] = sout.results[i].node;
-            sout.results[i].node.name = NULL;
-            sout.results[i].node.project = NULL;
-            sout.results[i].node.label = NULL;
-            sout.results[i].node.qualified_name = NULL;
-            sout.results[i].node.file_path = NULL;
-            sout.results[i].node.properties_json = NULL;
-        }
-        cbm_store_search_free(&sout);
+        cbm_store_find_nodes(store, project, out_nodes, out_count);
     }
     /* Apply inline property filters — free rejected nodes' strings */
     if (first->prop_count > 0) {
@@ -4229,6 +4212,31 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         if (start_bound && patn->rel_count > 0) {
             const char *tv = nvar;
             expand_pattern_rels(store, patn, bindings, bind_count, bind_cap, &tv, opt);
+<<<<<<< ours
+=======
+            continue;
+        }
+
+        /* Single-rel pattern whose START is unbound but whose TERMINAL is already
+         * bound: drive from the bound terminal instead of scanning all nodes for
+         * the start var (avoids the int-overflow OOB write and the c-IS-NULL
+         * corruption of #627). */
+        if (!start_bound && patn->rel_count == 1 && *bind_count > 0) {
+            const char *term_var = patn->nodes[1].variable;
+            bool term_bound = term_var && binding_get(&(*bindings)[0], term_var) != NULL;
+            if (term_bound) {
+                expand_from_bound_terminal(store, patn, bindings, bind_count, nvar, opt);
+                continue;
+            }
+        }
+
+        cbm_node_t *extra_nodes = NULL;
+        int extra_count = 0;
+        scan_pattern_nodes(store, project, &patn->nodes[0], &extra_nodes, &extra_count);
+        int rc = 0;
+        if (patn->rel_count == 0) {
+            rc = cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
+>>>>>>> theirs
         } else {
             cbm_node_t *extra_nodes = NULL;
             int extra_count = 0;
@@ -4281,7 +4289,7 @@ static int execute_single(cbm_store_t *store, cbm_query_t *q, const char *projec
     /* Step 1: Scan initial nodes */
     cbm_node_t *scanned = NULL;
     int scan_count = 0;
-    scan_pattern_nodes(store, project, max_rows, &pat0->nodes[0], &scanned, &scan_count);
+    scan_pattern_nodes(store, project, &pat0->nodes[0], &scanned, &scan_count);
 
     /* Build initial bindings with early WHERE */
     int bind_cap = scan_count > max_rows ? scan_count : (max_rows > 0 ? max_rows : SKIP_ONE);

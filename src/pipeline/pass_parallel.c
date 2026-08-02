@@ -1820,6 +1820,63 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         atomic_fetch_add_explicit(&rc->time_ns_rc_hint, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
 
+<<<<<<< ours
+=======
+        /* Perl call-graph noise guard (#476), mirroring the sequential pass
+         * (pass_calls.c). Perl has no LSP resolver; for builtins (push/shift/
+         * keys/...) and method calls ($obj->m, unresolved receiver), suppress
+         * only WEAK cross-file short-name matches and keep the high-confidence
+         * same_module / import_map strategies so a genuine same-file or
+         * imported call to a builtin-named sub still resolves. Placed after the
+         * field-type hint so a hint cannot re-introduce a suppressed edge.
+         * Gated to Perl — other languages are unaffected. */
+        if (cbm_perl_suppress_generic_match(lang == CBM_LANG_PERL, call->is_method,
+                                            call->callee_name, res.strategy)) {
+            continue;
+        }
+
+        /* Dynamic-language weak-method suppression (#592/#606/#1276). The
+         * receiver-aware guard must NOT drop this call here: doing so would
+         * also skip the #523 callee-name service bypass below,
+         * emit_service_edge's route/gRPC/config branches, and its unconditional
+         * detect_url_in_args (which classifies verb-suffix HTTP clients like
+         * api.patch('/x')). Instead, defer to the emit path and suppress ONLY
+         * the plain-CALLS fall-through
+         * (emit_normal_calls_edge), so every service edge stays main-identical by
+         * construction. res.strategy may carry an lsp_* value here (LSP-resolved
+         * calls keep res through this point); the helper's EXPLICIT drop-list
+         * leaves lsp_ts_method / lsp_cross untouched. See #606 direction. */
+        bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
+                                    lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+        bool drop_plain_call =
+            cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy);
+
+        /* Service-pattern HTTP/ASYNC client call (`requests.get(url)`): the
+         * service signal lives in the callee_name. The registry can mis-resolve
+         * it to a spurious builtin short-name match (`requests.get` ->
+         * `builtins.dict.get` via "get"), which is non-empty and not an HTTP
+         * pattern, so the resolved-QN service checks below miss it and the call
+         * is dropped. Detect it on the callee_name FIRST so the HTTP_CALLS/
+         * ASYNC_CALLS edge is emitted regardless (target is a synthesized route
+         * node, not the unindexed library). Mirrors pass_calls.c. (#523) */
+        cbm_svc_kind_t csvc = cbm_service_pattern_match(call->callee_name);
+        if (csvc == CBM_SVC_HTTP || csvc == CBM_SVC_ASYNC) {
+            const char *cu = call->first_string_arg;
+            bool chas_url = cu && cu[0] != '\0' &&
+                            (cu[0] == '/' || strstr(cu, "://") != NULL ||
+                             (csvc == CBM_SVC_ASYNC && strlen(cu) > PP_ESC_SPACE));
+            if (chas_url) {
+                cbm_resolution_t svc_res = {.qualified_name = call->callee_name,
+                                            .confidence = PP_HALF_CONF,
+                                            .strategy = "service_pattern"};
+                emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &svc_res,
+                                  module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
+                                  imp_count, false);
+                continue;
+            }
+        }
+
+>>>>>>> theirs
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             if (cbm_service_pattern_route_method(call->callee_name) != NULL) {
                 cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
@@ -1849,7 +1906,12 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
         }
         _rc_t0 = extract_now_ns();
         emit_service_edge(ws->local_edge_buf, source_node, target_node, call, &res, module_qn,
+<<<<<<< ours
                           rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count);
+=======
+                          rc->registry, rc->main_gbuf, imp_keys, imp_vals, imp_count,
+                          drop_plain_call);
+>>>>>>> theirs
         atomic_fetch_add_explicit(&rc->time_ns_rc_emit, extract_now_ns() - _rc_t0,
                                   memory_order_relaxed);
         ws->calls_resolved++;

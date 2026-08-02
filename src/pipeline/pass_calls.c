@@ -366,12 +366,69 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
         return 0;
     }
+<<<<<<< ours
+=======
+
+    /* Perl call-graph noise guard (#476). Perl has no LSP resolver, so the
+     * generic registry chain is the only resolver; for builtins (push/shift/
+     * keys/...) and method calls ($obj->m with an unresolved receiver), a *weak*
+     * cross-file short-name match to a project sub sharing the name is almost
+     * always a false positive. Suppress only those weak matches; KEEP the
+     * high-confidence same_module / import_map strategies so a genuine
+     * same-file or imported call to a builtin-named sub still resolves. Gated
+     * to Perl — other languages are unaffected. */
+    if (cbm_perl_suppress_generic_match(lang == CBM_LANG_PERL, call->is_method, call->callee_name,
+                                        res.strategy)) {
+        return 0;
+    }
+
+    /* Dynamic-language weak-method suppression (#592/#606/#1276). A member call
+     * x.foo() only reaches the registry when the language-specific resolver
+     * could not resolve the receiver type
+     * (the LSP block above already returned for type-resolved calls, including
+     * the "resolved but target out of gbuf" fall-through). Binding such a call
+     * by a weak short-name strategy fabricates an edge (`re.test()` -> a project
+     * `test`). Rather than drop it here — which would also skip the service
+     * bypasses below and emit_classified_edge's route/HTTP/CONFIG branches —
+     * defer to emit_classified_edge and suppress ONLY the plain-CALLS
+     * fall-through, so every service edge stays main-identical. res.strategy may
+     * be lsp_* here; the helper's explicit drop-list leaves lsp_* untouched. */
+    bool suppress_weak_member = lang == CBM_LANG_PYTHON || lang == CBM_LANG_JAVASCRIPT ||
+                                lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX;
+    bool drop_plain_call =
+        cbm_suppress_weak_member_match(suppress_weak_member, call->is_method, res.strategy);
+
+    /* Service-pattern HTTP/ASYNC calls to an EXTERNAL client library (e.g.
+     * `requests.get("/api/orders/{id}")`) resolve to a QN containing the library
+     * name ("requests"), but that library is not in the indexed tree so
+     * cbm_gbuf_find_by_qn returns NULL. The edge target for such calls is a
+     * SYNTHESIZED route node (create_svc_route_node), not the library node, so
+     * the missing target must NOT drop the call — otherwise no HTTP_CALLS edge
+     * is written and cross-repo matching finds nothing (#523). Emit directly
+     * when the call carries a URL/topic first argument. */
+    cbm_svc_kind_t svc = cbm_service_pattern_match(res.qualified_name);
+    if (svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) {
+        const char *u = call->first_string_arg;
+        bool has_url_or_topic = u && u[0] != '\0' &&
+                                (u[0] == '/' || strstr(u, "://") != NULL ||
+                                 (svc == CBM_SVC_ASYNC && strlen(u) > PAIR_LEN));
+        if (has_url_or_topic) {
+            emit_http_async_edge(ctx, call, source_node, NULL, &res, svc, false);
+            return SKIP_ONE;
+        }
+    }
+
+>>>>>>> theirs
     const cbm_gbuf_node_t *target_node = cbm_gbuf_find_by_qn(ctx->gbuf, res.qualified_name);
     if (!target_node || source_node->id == target_node->id) {
         return 0;
     }
     emit_classified_edge(ctx, call, source_node, target_node, &res, module_qn, imp_keys, imp_vals,
+<<<<<<< ours
                          imp_count);
+=======
+                         imp_count, drop_plain_call);
+>>>>>>> theirs
     return SKIP_ONE;
 }
 

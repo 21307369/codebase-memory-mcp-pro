@@ -978,6 +978,518 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
     PASS();
 }
 
+<<<<<<< ours
+=======
+/* TS/JS receiver-aware weak-strategy suppression (#592/#606 direction; Perl
+ * precedent #477). A member call x.foo() whose receiver TYPE the TS-LSP cannot
+ * resolve (a regex literal `re.test()`) must NOT be bound to a same-named
+ * project method by a weak short-name strategy — that fabricates a CALLS edge.
+ * Type-resolved receivers (`c.test()` on a typed SalesforceRestClient) and bare
+ * local calls must still resolve. < 50 files → sequential path (pass_calls.c).
+ * RED before the fix: checkFormat->test exists via unique_name/suffix_match. */
+static void write_temp_file(const char *dir, const char *name, const char *content);
+TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_tsjs_recv_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    /* The lone project symbol named "test" — a real method. */
+    write_temp_file(tmp, "src/client.ts",
+                    "export class SalesforceRestClient {\n"
+                    "  test(): boolean {\n"
+                    "    return true;\n"
+                    "  }\n"
+                    "}\n");
+    /* Regex receiver: `re.test(s)` calls RegExp.prototype.test, NOT the method.
+     * The TS-LSP cannot bind it to a project symbol → the registry would guess
+     * "test" by short name (weak). This is the false edge to suppress. */
+    write_temp_file(tmp, "src/caller.ts",
+                    "const re = /^[a-z]+$/;\n"
+                    "export function checkFormat(s: string): boolean {\n"
+                    "  return re.test(s);\n"
+                    "}\n");
+    /* Typed receiver: `c` is annotated SalesforceRestClient, so the TS-LSP
+     * resolves c.test() to the method (lsp_ts_method, conf 0.95) BEFORE the
+     * registry runs — the guard's explicit drop-list keeps every lsp_* edge. */
+    write_temp_file(tmp, "src/typed.ts",
+                    "import { SalesforceRestClient } from './client';\n"
+                    "export function runTyped(c: SalesforceRestClient): boolean {\n"
+                    "  return c.test();\n"
+                    "}\n");
+    /* Bare local call: same-module resolution, unaffected by the guard. */
+    write_temp_file(tmp, "src/local.ts",
+                    "function localHelper(): number {\n"
+                    "  return 1;\n"
+                    "}\n"
+                    "export function callsLocal(): number {\n"
+                    "  return localHelper();\n"
+                    "}\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/tsjs_recv.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    /* (1) The false edge is suppressed (reproduce-first: RED before the fix). */
+    ASSERT_FALSE(cross_file_call_exists(s, project, "checkFormat", "test"));
+    /* (2) The type-resolved receiver call survives (LSP wins before the guard). */
+    ASSERT_TRUE(cross_file_call_exists(s, project, "runTyped", "test"));
+    /* (3) The bare local call survives (same-module / lsp_ts_local). */
+    ASSERT_TRUE(cross_file_call_exists(s, project, "callsLocal", "localHelper"));
+    /* (4) breadth insurance: the real edges are still emitted. */
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "CALLS"), 2);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Python counterpart to the TS/JS receiver guard (#1276). An unresolved
+ * attribute call on an unknown/external receiver must not bind to the lone
+ * same-named project method through unique_name. A bare local call must
+ * continue to produce an ordinary CALLS edge.
+ * Fewer than 50 files exercises pass_calls.c. */
+TEST(pipeline_python_receiver_suppresses_weak_method_edge) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_python_recv_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "worker.py",
+                    "class Worker:\n"
+                    "    def backward(self):\n"
+                    "        return 1\n");
+    write_temp_file(tmp, "pkg/__init__.py", "from .helper import compute\n");
+    write_temp_file(tmp, "pkg/helper.py",
+                    "def compute(value):\n"
+                    "    return value * 2\n");
+    write_temp_file(tmp, "caller.py",
+                    "from pkg import helper\n"
+                    "\n"
+                    "def external_call(accelerator):\n"
+                    "    return accelerator.backward()\n"
+                    "\n"
+                    "def imported_call():\n"
+                    "    return helper.compute(42)\n"
+                    "\n"
+                    "def local_helper():\n"
+                    "    return 1\n"
+                    "\n"
+                    "def bare_call():\n"
+                    "    return local_helper()\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/python_recv.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_FALSE(cross_file_call_exists(s, project, "external_call", "backward"));
+    ASSERT_TRUE(cross_file_call_exists(s, project, "imported_call", "compute"));
+    ASSERT_TRUE(cross_file_call_exists(s, project, "bare_call", "local_helper"));
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "CALLS"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Count nodes with the given exact name in the project (e.g. a Route path). */
+static int count_nodes_named(cbm_store_t *s, const char *project, const char *name) {
+    cbm_node_t *ns = NULL;
+    int n = 0;
+    cbm_store_find_nodes_by_name(s, project, name, &ns, &n);
+    if (ns) {
+        cbm_store_free_nodes(ns, n);
+    }
+    return n;
+}
+
+/* Parallel-resolver regression for the TS/JS receiver guard (>= 50 files forces
+ * pass_parallel.c's resolve_file_calls). The guard must not drop a weak member
+ * match before the service classification runs — it suppresses ONLY the plain
+ * CALLS fall-through, so every service edge (HTTP_CALLS via the #523 callee
+ * bypass or emit_service_edge's unconditional detect_url_in_args, Route via the
+ * ROUTE_REG fall-through, …) is emitted exactly as on main. These callees are
+ * classified by main's verb-suffix + URL-arg heuristic, NOT by an HTTP library
+ * name in the callee — a duplicated predicate keyed on the resolved QN lost them
+ * (axios.get, api.patch on a renamed-axios instance, supertest request(app).get).
+ * The regex false edge must stay suppressed in parallel too. CBM_WORKERS forces
+ * >1 worker so the parallel path is taken regardless of the host core count. */
+TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_tsjs_par_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    /* The lone project symbols named get()/patch()/test() — weak short-name
+     * targets the registry mis-binds the member calls below to. */
+    write_temp_file(tmp, "src/thing.ts",
+                    "export class ApiThing {\n"
+                    "  get(): number {\n"
+                    "    return 1;\n"
+                    "  }\n"
+                    "  patch(): number {\n"
+                    "    return 2;\n"
+                    "  }\n"
+                    "  load(): number {\n"
+                    "    return 3;\n"
+                    "  }\n"
+                    "}\n"
+                    "export class Other {\n"
+                    "  test(): boolean {\n"
+                    "    return true;\n"
+                    "  }\n"
+                    "}\n");
+    /* Untyped axios: the HTTP signal is in the callee name, not the resolved QN
+     * (the registry mis-binds "get" to ApiThing.get). Must yield HTTP_CALLS. */
+    write_temp_file(tmp, "src/http.ts",
+                    "export function callApi() {\n"
+                    "  return axios.get('/api/orders');\n"
+                    "}\n");
+    /* Renamed axios instance `api`: no HTTP lib id in the callee — classified by
+     * the .patch verb suffix + URL arg. Must yield HTTP_CALLS (was lost when the
+     * exemption keyed on the resolved QN only). */
+    write_temp_file(tmp, "src/http2.ts",
+                    "export function callPatch(): unknown {\n"
+                    "  return api.patch('/plans/:id', {});\n"
+                    "}\n");
+    /* Supertest-style chained receiver `request(app).get('/y')` — untyped, verb
+     * suffix + URL arg. */
+    write_temp_file(tmp, "src/supertest.ts",
+                    "export function callSup(app: unknown): unknown {\n"
+                    "  return request(app).get('/y');\n"
+                    "}\n");
+    /* `dev.load('/data')`: `.load` is NOT a route suffix and `dev` is not an HTTP
+     * lib, so main classifies it via the unconditional detect_url_in_args (URL
+     * arg) -> HTTP_CALLS, while the weak plain match to ApiThing.load is the false
+     * edge that must be suppressed. This is exactly the detect_url_in_args path
+     * the previous (predicate-duplicating) guard skipped by dropping the call
+     * before emit_service_edge ran — the class of ~399 HTTP_CALLS it lost. */
+    write_temp_file(tmp, "src/load.ts",
+                    "export function callLoad(dev: unknown): unknown {\n"
+                    "  return dev.load('/api/data');\n"
+                    "}\n");
+    /* Route registration by callee suffix + a '/'-path arg. Must yield a Route. */
+    write_temp_file(tmp, "src/routes.ts",
+                    "function handler() {}\n"
+                    "export function reg(router: any) {\n"
+                    "  router.get('/users', handler);\n"
+                    "}\n");
+    /* Regex receiver: the false edge that must stay suppressed in parallel too. */
+    write_temp_file(tmp, "src/re.ts",
+                    "const re = /^[a-z]+$/;\n"
+                    "export function checkFormat(s: string): boolean {\n"
+                    "  return re.test(s);\n"
+                    "}\n");
+    /* Pad past MIN_FILES_FOR_PARALLEL (50) so the parallel resolver runs. */
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number {\n  return %d;\n}\n", i,
+                 i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1); /* force parallel regardless of host cores */
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/tsjs_par.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    /* (1) Genuine HTTP_CALLS survive under the guard (>= 3):
+     *   - axios.get('/api/orders') -> 2 edges (recognized lib #523 callee bypass
+     *     + detect_url_in_args), and
+     *   - dev.load('/api/data')    -> 1 edge via detect_url_in_args, which runs
+     *     unconditionally after emit_service_edge's branch even when the plain
+     *     fall-through is suppressed.
+     * dev.load is the class the predicate-duplicating guard lost: `.load` is not
+     * a route suffix and `dev` is not an HTTP lib, so it was dropped before
+     * emit_service_edge ran (RED on that guard: only axios's 2). */
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 3);
+    /* (2) The verb-suffix + route-path member calls keep their route
+     * registrations (edge type CALLS -> a Route node named by the path). These
+     * classify as route_registration on main, NOT HTTP_CALLS — Option A preserves
+     * that by construction. Assert the three Route paths survive:
+     * api.patch('/plans/:id'), request(app).get('/y'), router.get('/users'). */
+    ASSERT_GTE(count_nodes_named(s, project, "/plans/:id"), 1);
+    ASSERT_GTE(count_nodes_named(s, project, "/y"), 1);
+    ASSERT_GTE(count_nodes_named(s, project, "/users"), 1);
+    /* (3) The false plain-CALLS edges are suppressed in parallel: the regex
+     * receiver and the dev.load weak match to ApiThing.load. */
+    ASSERT_FALSE(cross_file_call_exists(s, project, "checkFormat", "test"));
+    ASSERT_FALSE(cross_file_call_exists(s, project, "callLoad", "load"));
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Parallel Python regression for #1276. The field-type heuristic capitalizes
+ * the receiver token and previously promoted accelerator.print() to
+ * MockAccelerator.print at 0.85; ordinary suffix matching also selected one
+ * arbitrary backward()/step() implementation. All are unresolved receiver
+ * calls and must remain absent from the final graph, while a bare local call
+ * remains. >= 50 files forces pass_parallel.c and try_field_type_hint(). */
+TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_python_par_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "targets.py",
+                    "class MockAccelerator:\n"
+                    "    def print(self, value):\n"
+                    "        return value\n"
+                    "\n"
+                    "class OtherPrinter:\n"
+                    "    def print(self, value):\n"
+                    "        return value\n"
+                    "\n"
+                    "class FlashAttentionFunction:\n"
+                    "    def backward(self, loss):\n"
+                    "        return loss\n"
+                    "\n"
+                    "class OtherBackward:\n"
+                    "    def backward(self, loss):\n"
+                    "        return loss\n"
+                    "\n"
+                    "class EulerScheduler:\n"
+                    "    def step(self):\n"
+                    "        return 1\n"
+                    "\n"
+                    "class OtherScheduler:\n"
+                    "    def step(self):\n"
+                    "        return 1\n");
+    write_temp_file(tmp, "pkg/__init__.py", "from .helper import compute\n");
+    write_temp_file(tmp, "pkg/helper.py",
+                    "def compute(value):\n"
+                    "    return value * 2\n");
+    write_temp_file(tmp, "caller.py",
+                    "from pkg import helper\n"
+                    "\n"
+                    "def local_helper():\n"
+                    "    return 1\n"
+                    "\n"
+                    "def train(accelerator, trainer):\n"
+                    "    accelerator.print('hello')\n"
+                    "    accelerator.backward(1)\n"
+                    "    trainer.lr_scheduler.step()\n"
+                    "    helper.compute(42)\n"
+                    "    return local_helper()\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "filler%d.py", i);
+        snprintf(body, sizeof(body), "def filler%d():\n    return %d\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/python_par.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_FALSE(cross_file_call_exists(s, project, "train", "print"));
+    ASSERT_FALSE(cross_file_call_exists(s, project, "train", "backward"));
+    ASSERT_FALSE(cross_file_call_exists(s, project, "train", "step"));
+    ASSERT_TRUE(cross_file_call_exists(s, project, "train", "compute"));
+    ASSERT_TRUE(cross_file_call_exists(s, project, "train", "local_helper"));
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Native `fetch()` (#856), sequential path (< 50 files → pass_calls.c). A bare
+ * unqualified call to the global fetch API has no import and no local
+ * definition anywhere in this project, so registry resolution comes back
+ * empty; classify it as HTTP_CALLS via the same #523-style empty-resolution
+ * fallback used for axios/requests. A member call on an unrelated receiver
+ * (`repo.fetch()`) must NOT be swept in — its callee_name is "repo.fetch",
+ * not the bare "fetch" this check matches exactly. */
+TEST(pipeline_native_fetch_classified_as_http_calls) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_fetch_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/api.ts",
+                    "export function loadData(): unknown {\n"
+                    "  return fetch('/api/data');\n"
+                    "}\n");
+    /* `repo.fetch()` — a method call, not the global. Must not over-match. */
+    write_temp_file(tmp, "src/repo.ts",
+                    "export function useRepo(repo: { fetch: () => unknown }): unknown {\n"
+                    "  return repo.fetch();\n"
+                    "}\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/fetch.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 1);
+    /* Exactly the bare call, not the method call too. */
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Native `fetch()` (#856), parallel path (>= 50 files -> pass_parallel.c's
+ * resolve_file_calls). Mirrors pipeline_native_fetch_classified_as_http_calls
+ * but forces the parallel resolver, since the empty-resolution fallback is a
+ * separate implementation there (resolve_file_calls calls
+ * emit_http_async_service_edge directly rather than through emit_service_edge,
+ * which would otherwise re-derive CBM_SVC_NONE for "fetch" and silently fall
+ * through to a plain CALLS edge). */
+TEST(pipeline_native_fetch_parallel_classified_as_http_calls) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_fetch_par_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/api.ts",
+                    "export function loadData(): unknown {\n"
+                    "  return fetch('/api/data');\n"
+                    "}\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number {\n  return %d;\n}\n", i,
+                 i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1); /* force parallel regardless of host cores */
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/fetch_par.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Native `fetch()` (#856): a LOCAL `fetch` definition must win over the
+ * global-API guess. Registry resolution finds this project's own top-level
+ * `fetch` function, so the call is a plain CALLS edge to it — never
+ * HTTP_CALLS. Isolated in its own project: the registry's project-wide
+ * unique-name fallback means a local `fetch` anywhere in a project can
+ * legitimately capture bare `fetch()` calls project-wide, so this must not
+ * share a project with the genuine-native-fetch test above. */
+TEST(pipeline_local_fetch_shadow_not_classified_as_http) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_fetch_shadow_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/local_fetch.ts",
+                    "function fetch(url: string): string {\n"
+                    "  return 'mock:' + url;\n"
+                    "}\n"
+                    "export function useLocalFetch(): string {\n"
+                    "  return fetch('/api/data');\n"
+                    "}\n");
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/fetch_shadow.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(s);
+
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 0);
+    ASSERT_TRUE(cross_file_call_exists(s, project, "useLocalFetch", "fetch"));
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
+>>>>>>> theirs
 /* ── Git history pass tests ─────────────────────────────────────── */
 
 TEST(githistory_is_trackable) {
@@ -6505,6 +7017,16 @@ SUITE(pipeline) {
     /* Calls pass */
     RUN_TEST(pipeline_calls_resolution);
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
+<<<<<<< ours
+=======
+    RUN_TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges);
+    RUN_TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges);
+    RUN_TEST(pipeline_native_fetch_classified_as_http_calls);
+    RUN_TEST(pipeline_native_fetch_parallel_classified_as_http_calls);
+    RUN_TEST(pipeline_local_fetch_shadow_not_classified_as_http);
+>>>>>>> theirs
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);

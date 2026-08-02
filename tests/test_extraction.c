@@ -3323,6 +3323,7 @@ TEST(complexity_access_depth_and_params) {
     PASS();
 }
 
+<<<<<<< ours
 /* M2-c: Swift enum cases are extracted as distinct "EnumCase" nodes (previously
  * dropped entirely — enum_entry was not a recognized member kind). A multi-name
  * line (`case east, west`) must split into one EnumCase per case identifier. */
@@ -3330,6 +3331,217 @@ TEST(swift_enum_cases_extracted_as_enumcase) {
     CBMFileResult *r = extract("enum Direction {\n"
                                "    case north\n"
                                "    case east, west\n"
+=======
+/* ═══════════════════════════════════════════════════════════════════
+ * Perl call-graph noise (#459 follow-up)
+ * ═══════════════════════════════════════════════════════════════════ */
+
+/* Count calls whose callee_name is exactly `name` (has_call is substring). */
+static int count_calls_exact(CBMFileResult *r, const char *name) {
+    int n = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, name) == 0)
+            n++;
+    }
+    return n;
+}
+
+/* (b) A dotted config string must never be extracted as a callee. */
+TEST(extract_perl_config_string_not_a_callee) {
+    CBMFileResult *r = extract("package C;\n"
+                               "sub run {\n"
+                               "  my $cfg = { \"log4perl.appender.File.utf8\" => 1 };\n"
+                               "  helper();\n"
+                               "}\n"
+                               "sub helper { return 1; }\n"
+                               "1;\n",
+                               CBM_LANG_PERL, "t", "app.pl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* No callee may contain a '.' (config/string tokens are rejected). */
+    for (int i = 0; i < r->calls.count; i++) {
+        ASSERT_TRUE(strchr(r->calls.items[i].callee_name, '.') == NULL);
+    }
+    /* (d) The genuine intra-file function call is still extracted. */
+    ASSERT_TRUE(count_calls_exact(r, "helper") >= 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* (a) A Perl builtin call is extracted as a non-method callee. Suppression of
+ *     the resulting CALLS edge happens in the resolver (see test_registry.c /
+ *     end-to-end); extraction itself keeps the bare builtin token. */
+TEST(extract_perl_builtin_call_is_function_not_method) {
+    CBMFileResult *r = extract("package B;\n"
+                               "sub run {\n"
+                               "  my @x;\n"
+                               "  push @x, 1;\n"
+                               "  keys %h;\n"
+                               "}\n"
+                               "1;\n",
+                               CBM_LANG_PERL, "t", "b.pl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* push / keys are extracted (they are valid identifiers) ... */
+    ASSERT_TRUE(has_call(r, "push"));
+    /* ... and crucially are NOT flagged as method calls. */
+    for (int i = 0; i < r->calls.count; i++) {
+        ASSERT_FALSE(r->calls.items[i].is_method);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* (c) An arrow/method call is extracted with is_method=true so the resolver
+ *     can suppress generic short-name matching for it. */
+TEST(extract_perl_method_call_flags_is_method) {
+    CBMFileResult *r = extract("package M;\n"
+                               "sub run {\n"
+                               "  my $self = shift;\n"
+                               "  $self->commit();\n"
+                               "  $dbh->commit();\n"
+                               "  helper();\n"
+                               "}\n"
+                               "sub helper { return 1; }\n"
+                               "1;\n",
+                               CBM_LANG_PERL, "t", "m.pl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    /* Every "commit" call is a method call (is_method set). */
+    int commit_calls = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (strcmp(r->calls.items[i].callee_name, "commit") == 0) {
+            commit_calls++;
+            ASSERT_TRUE(r->calls.items[i].is_method);
+        }
+        /* The genuine function call is NOT a method. */
+        if (strcmp(r->calls.items[i].callee_name, "helper") == 0) {
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        }
+    }
+    ASSERT_TRUE(commit_calls >= 1);
+    /* (d) genuine intra-file function call still extracted. */
+    ASSERT_TRUE(count_calls_exact(r, "helper") >= 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Languages OUTSIDE the is_method flag set (only Perl and TS/JS/TSX set it) must
+ * be unaffected: a Go method call never sets is_method. */
+TEST(extract_flag_exempt_method_call_not_flagged_is_method) {
+    CBMFileResult *r = extract("package m\n"
+                               "func run(o Obj) { o.Commit(); helper() }\n",
+                               CBM_LANG_GO, "t", "x.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    for (int i = 0; i < r->calls.count; i++) {
+        ASSERT_FALSE(r->calls.items[i].is_method);
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Python attribute calls on unknown receivers are flagged so they cannot bind
+ * to unrelated project methods by name. Direct self/cls/super() calls retain
+ * class-local semantics, and imported receivers remain import-resolvable. */
+TEST(extract_python_member_call_flags_is_method) {
+    CBMFileResult *r = extract("from pkg import helper\n"
+                               "import tools as toolkit\n"
+                               "\n"
+                               "class C(Base):\n"
+                               "    def run(self, external):\n"
+                               "        external.commit()\n"
+                               "        self.client.send()\n"
+                               "        self.helper()\n"
+                               "        super ( ).render()\n"
+                               "        helper.compute()\n"
+                               "        toolkit.format()\n"
+                               "        helper()\n",
+                               CBM_LANG_PYTHON, "t", "x.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int external = 0;
+    int nested = 0;
+    int self_call = 0;
+    int super_call = 0;
+    int imported_module = 0;
+    int imported_alias = 0;
+    int bare = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *cn = r->calls.items[i].callee_name;
+        if (strcmp(cn, "external.commit") == 0) {
+            external++;
+            ASSERT_TRUE(r->calls.items[i].is_method);
+        } else if (strcmp(cn, "self.client.send") == 0) {
+            nested++;
+            ASSERT_TRUE(r->calls.items[i].is_method);
+        } else if (strcmp(cn, "self.helper") == 0) {
+            self_call++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        } else if (strstr(cn, "render") != NULL) {
+            super_call++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        } else if (strcmp(cn, "helper.compute") == 0) {
+            imported_module++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        } else if (strcmp(cn, "toolkit.format") == 0) {
+            imported_alias++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        } else if (strcmp(cn, "helper") == 0) {
+            bare++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        }
+    }
+    ASSERT_EQ(external, 1);
+    ASSERT_EQ(nested, 1);
+    ASSERT_EQ(self_call, 1);
+    ASSERT_EQ(super_call, 1);
+    ASSERT_EQ(imported_module, 1);
+    ASSERT_EQ(imported_alias, 1);
+    ASSERT_EQ(bare, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* TS/JS/TSX receiver-aware flag (#592/#606; same intent as the Perl flag above).
+ * A member call x.foo() with a non-this/super receiver is flagged is_method so
+ * the resolver can suppress a weak short-name match (`re.test()` must not bind a
+ * project `test`); a bare call is not flagged. */
+TEST(extract_ts_member_call_flags_is_method) {
+    CBMFileResult *r = extract("const re = /^a+$/;\n"
+                               "export function checkFormat(s: string) { return re.test(s); }\n"
+                               "function helper() { return 1; }\n"
+                               "export function run() { return helper(); }\n",
+                               CBM_LANG_TYPESCRIPT, "t", "a.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int member = 0;
+    int bare = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *cn = r->calls.items[i].callee_name;
+        if (strcmp(cn, "re.test") == 0) {
+            member++;
+            ASSERT_TRUE(r->calls.items[i].is_method);
+        }
+        if (strcmp(cn, "helper") == 0) {
+            bare++;
+            ASSERT_FALSE(r->calls.items[i].is_method);
+        }
+    }
+    ASSERT_TRUE(member >= 1); /* re.test() flagged */
+    ASSERT_TRUE(bare >= 1);   /* helper() not flagged */
+    cbm_free_result(r);
+    PASS();
+}
+
+/* this/super receivers keep the enclosing-class target, where a weak
+ * namespace-proximity match is usually correct — so they are NOT flagged. A
+ * new_expression has no member receiver and is never flagged either. */
+TEST(extract_ts_this_super_receiver_not_flagged) {
+    CBMFileResult *r = extract("class A extends B {\n"
+                               "  m() { this.helper(); super.render(); return new A(); }\n"
+                               "  helper() {}\n"
+>>>>>>> theirs
                                "}\n",
                                CBM_LANG_SWIFT, "t", "Enum.swift");
     ASSERT_NOT_NULL(r);
@@ -4431,6 +4643,56 @@ SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
 
+<<<<<<< ours
+=======
+    /* Wide-flat-file linearity (ms-typescript hang) */
+    RUN_TEST(extract_wide_flat_file_is_linear);
+
+    /* Perl call-graph noise (#459 follow-up) */
+    RUN_TEST(extract_perl_config_string_not_a_callee);
+    RUN_TEST(extract_perl_builtin_call_is_function_not_method);
+    RUN_TEST(extract_perl_method_call_flags_is_method);
+    RUN_TEST(extract_flag_exempt_method_call_not_flagged_is_method);
+    RUN_TEST(extract_python_member_call_flags_is_method);
+    RUN_TEST(extract_ts_member_call_flags_is_method);
+    RUN_TEST(extract_ts_this_super_receiver_not_flagged);
+    RUN_TEST(extract_js_member_call_flags_is_method);
+
+    /* InterSystems ObjectScript (UDL / routine / Export XML). */
+    RUN_TEST(objectscript_udl_class);
+    RUN_TEST(objectscript_udl_methods_after_goto_label);
+    RUN_TEST(objectscript_udl_methods);
+    RUN_TEST(objectscript_udl_base_classes);
+    RUN_TEST(objectscript_udl_multiple_bases);
+    RUN_TEST(objectscript_udl_properties);
+    RUN_TEST(objectscript_routine_tags);
+    RUN_TEST(objectscript_udl_query_member);
+    RUN_TEST(objectscript_udl_index_member);
+    RUN_TEST(objectscript_udl_xdata_member);
+    RUN_TEST(objectscript_udl_trigger_member);
+    RUN_TEST(objectscript_udl_trigger_body_quit);
+    RUN_TEST(objectscript_udl_trigger_body_tokens);
+    RUN_TEST(objectscript_udl_ensemble_production_def_parses_items);
+    RUN_TEST(objectscript_udl_ensemble_production_def_hs_settings);
+    RUN_TEST(objectscript_udl_ensemble_production_def_absent_no_error);
+    RUN_TEST(objectscript_udl_self_call_relative_dot_method);
+    RUN_TEST(objectscript_udl_calls_typed_new);
+    RUN_TEST(objectscript_udl_calls_typed_param);
+    RUN_TEST(objectscript_udl_calls_typed_property);
+    RUN_TEST(objectscript_macro_expand_system);
+    RUN_TEST(objectscript_macro_expand_local);
+    RUN_TEST(objectscript_macro_constant_no_extra_call);
+    RUN_TEST(objectscript_udl_method_return_type);
+    RUN_TEST(objectscript_udl_scalar_return_type_not_resolved);
+    RUN_TEST(objectscript_data_flows_class_method_args);
+    RUN_TEST(objectscript_data_flows_instance_method_args);
+    RUN_TEST(iris_export_xml_simple_class);
+    RUN_TEST(iris_export_xml_classmethod);
+    RUN_TEST(iris_export_xml_property_parameter_index);
+    RUN_TEST(iris_export_xml_calls_extracted);
+    RUN_TEST(iris_export_xml_multi_class);
+
+>>>>>>> theirs
     /* R box-module imports + member calls */
     RUN_TEST(extract_r_box_use_imports_issue218);
     RUN_TEST(extract_r_dollar_call_issue219);

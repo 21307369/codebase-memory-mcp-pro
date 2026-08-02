@@ -1147,6 +1147,361 @@ static void extract_jsx_component_ref(CBMExtractCtx *ctx, TSNode node, const cha
     }
 }
 
+<<<<<<< ours
+=======
+// Kotlin: `a OP b` desugars to an operator-method call `a.<method>(b)`. The
+// generic call walk keys on call_expression nodes and so never sees these
+// precedence-specific binary-expression nodes, leaving the type-aware LSP
+// operator resolution (lsp_kt_operator -> the user `operator fun`) with no call
+// site to attach to. Record a textual call to the operator method's bare name;
+// the operator-token -> method mapping mirrors kotlin_lsp.c's binary handler so
+// the names join. Builtin operands (Int+Int) resolve to a stdlib type with no
+// graph node and drop, exactly as before — only user `operator fun`s gain edges.
+static void extract_kotlin_operator_call(CBMExtractCtx *ctx, TSNode node, const char *kind,
+                                         const char *enclosing_func_qn) {
+    if (strcmp(kind, "binary_expression") != 0 && strcmp(kind, "additive_expression") != 0 &&
+        strcmp(kind, "multiplicative_expression") != 0 &&
+        strcmp(kind, "comparison_expression") != 0 && strcmp(kind, "equality_expression") != 0 &&
+        strcmp(kind, "range_expression") != 0) {
+        return;
+    }
+    uint32_t ncc = ts_node_named_child_count(node);
+    TSNode lhs = ts_node_child_by_field_name(node, TS_FIELD("left"));
+    TSNode rhs = ts_node_child_by_field_name(node, TS_FIELD("right"));
+    if (ts_node_is_null(lhs) && ncc >= 1) {
+        lhs = ts_node_named_child(node, 0);
+    }
+    if (ts_node_is_null(rhs) && ncc >= 2) {
+        rhs = ts_node_named_child(node, ncc - 1);
+    }
+    if (ts_node_is_null(lhs) || ts_node_is_null(rhs)) {
+        return;
+    }
+    uint32_t lhs_end = ts_node_end_byte(lhs);
+    uint32_t rhs_start = ts_node_start_byte(rhs);
+    if (rhs_start <= lhs_end) {
+        return;
+    }
+    const char *between = ctx->source + lhs_end;
+    size_t blen = (size_t)(rhs_start - lhs_end);
+    const char *op_method = NULL;
+    if (cbm_memmem(between, blen, "===", 3) || cbm_memmem(between, blen, "!==", 3)) {
+        return; // identity comparison: no operator method
+    } else if (cbm_memmem(between, blen, "==", 2) || cbm_memmem(between, blen, "!=", 2)) {
+        op_method = "equals";
+    } else if (cbm_memmem(between, blen, "..<", 3)) {
+        op_method = "rangeUntil";
+    } else if (cbm_memmem(between, blen, "..", 2)) {
+        op_method = "rangeTo";
+    } else if (cbm_memmem(between, blen, "<", 1) || cbm_memmem(between, blen, ">", 1)) {
+        op_method = "compareTo"; // covers <, >, <=, >=
+    } else if (cbm_memmem(between, blen, "+", 1)) {
+        op_method = "plus";
+    } else if (cbm_memmem(between, blen, "-", 1)) {
+        op_method = "minus";
+    } else if (cbm_memmem(between, blen, "*", 1)) {
+        op_method = "times";
+    } else if (cbm_memmem(between, blen, "/", 1)) {
+        op_method = "div";
+    } else if (cbm_memmem(between, blen, "%", 1)) {
+        op_method = "rem";
+    }
+    if (!op_method) {
+        return;
+    }
+    CBMCall call = {0};
+    call.callee_name = op_method;
+    call.enclosing_func_qn = enclosing_func_qn;
+    call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+    cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+}
+
+// Kotlin convention-desugared calls that the call walk never sees as
+// call_expressions: `val (a,b) = e` -> e.component1()/e.component2(); and
+// `for (x in e)` -> e.iterator()/hasNext()/next(). Record textual calls to those
+// operator-convention method names so the LSP's lsp_kt_destructure /
+// lsp_kt_iterator resolutions have a call site to join (names match the LSP's).
+static void kt_push_implicit_call(CBMExtractCtx *ctx, TSNode node, const char *callee,
+                                  const char *enclosing_func_qn) {
+    CBMCall call = {0};
+    call.callee_name = callee;
+    call.enclosing_func_qn = enclosing_func_qn;
+    call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+    cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+}
+
+// C++ overloaded binary operator `a + b`: the operator method (`operator+`) is
+// invoked implicitly, so the call walk never sees a call node. Synthesize a
+// textual call to the bare operator name so the c-LSP's lsp_operator resolution
+// (which keys the same `operator<tok>` member on the lhs type) has a call site to
+// join. The operator token is the first unnamed child, mirroring c_lsp.c's binary
+// handling. Builtin-operand expressions (int + int) synthesize an `operator+`
+// callee too, but no such member exists so the call resolves to nothing and is
+// dropped — no spurious edge.
+static void extract_cpp_operator_call(CBMExtractCtx *ctx, TSNode node, const char *kind,
+                                      const char *enclosing_func_qn) {
+    if (strcmp(kind, "binary_expression") != 0) {
+        return;
+    }
+    TSNode lhs = ts_node_child_by_field_name(node, TS_FIELD("left"));
+    TSNode rhs = ts_node_child_by_field_name(node, TS_FIELD("right"));
+    if (ts_node_is_null(lhs) || ts_node_is_null(rhs)) {
+        return;
+    }
+    for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
+        TSNode child = ts_node_child(node, i);
+        if (ts_node_is_named(child)) {
+            continue;
+        }
+        char *op = cbm_node_text(ctx->arena, child, ctx->source);
+        if (op && op[0]) {
+            CBMCall call = {0};
+            call.callee_name = cbm_arena_sprintf(ctx->arena, "operator%s", op);
+            call.enclosing_func_qn = enclosing_func_qn;
+            call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+            cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+        }
+        break;
+    }
+}
+
+// C++ implicit calls that produce no textual call node: the destructor
+// (`delete p`), the copy/move constructor (`T a = b;` copy-init), and the
+// conversion operator (`if (obj)` where obj has `operator bool`). The c-LSP
+// resolves each to the corresponding member but there is no call site to join
+// to (callable=0). Synthesize a textual call sourced to the enclosing function
+// so the lsp_{destructor,copy_constructor,conversion} resolution binds.
+//
+//   - destructor: the callee QN embeds the type (`T.~T`), which is not textually
+//     available from `delete p`, so it joins via the reason gate — c_lsp stashes
+//     the operand text in `reason` and the synthesized callee is that same text.
+//   - copy constructor: the callee short-name is the constructed type (`T`),
+//     which IS textually present as the declaration's type — join by short-name.
+//   - conversion: the callee short-name is the type-independent `operator bool`.
+//
+// Spurious synthesis (a condition/operand that has no such member) resolves to
+// nothing and is dropped, so no extra edge is produced.
+static void extract_cpp_implicit_calls(CBMExtractCtx *ctx, TSNode node, const char *kind,
+                                       const char *enclosing_func_qn) {
+    const char *callee = NULL;
+    if (strcmp(kind, "delete_expression") == 0) {
+        TSNode operand = ts_node_child_by_field_name(node, TS_FIELD("argument"));
+        if (ts_node_is_null(operand) && ts_node_named_child_count(node) > 0) {
+            operand = ts_node_named_child(node, 0);
+        }
+        if (!ts_node_is_null(operand)) {
+            callee = cbm_node_text(ctx->arena, operand, ctx->source);
+        }
+    } else if (strcmp(kind, "if_statement") == 0 || strcmp(kind, "while_statement") == 0 ||
+               strcmp(kind, "do_statement") == 0) {
+        // `if (obj)` invokes obj's `operator bool`. Only a lone-identifier
+        // condition triggers it; comparisons/logical exprs evaluate to bool.
+        TSNode cond = ts_node_child_by_field_name(node, TS_FIELD("condition"));
+        if (!ts_node_is_null(cond)) {
+            TSNode inner = cond;
+            if (strcmp(ts_node_type(cond), "condition_clause") == 0 &&
+                ts_node_named_child_count(cond) == 1) {
+                inner = ts_node_named_child(cond, 0);
+            }
+            if (strcmp(ts_node_type(inner), "identifier") == 0) {
+                callee = "operator bool";
+            }
+        }
+    } else if (strcmp(kind, "declaration") == 0) {
+        // `T a = b;` — copy-init from an identifier invokes T's copy constructor.
+        TSNode type = ts_node_child_by_field_name(node, TS_FIELD("type"));
+        TSNode decl = ts_node_child_by_field_name(node, TS_FIELD("declarator"));
+        if (!ts_node_is_null(type) && !ts_node_is_null(decl) &&
+            strcmp(ts_node_type(decl), "init_declarator") == 0) {
+            TSNode value = ts_node_child_by_field_name(decl, TS_FIELD("value"));
+            if (!ts_node_is_null(value) && strcmp(ts_node_type(value), "identifier") == 0) {
+                char *tn = cbm_node_text(ctx->arena, type, ctx->source);
+                if (tn) {
+                    const char *colon = strrchr(tn, ':');
+                    callee = colon ? colon + 1 : tn;
+                }
+            }
+        }
+    }
+    if (callee && callee[0]) {
+        CBMCall call = {0};
+        call.callee_name = callee;
+        call.enclosing_func_qn = enclosing_func_qn;
+        call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+        cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+    }
+}
+
+static void extract_kotlin_desugared_calls(CBMExtractCtx *ctx, TSNode node, const char *kind,
+                                           const char *enclosing_func_qn) {
+    if (strcmp(kind, "property_declaration") == 0) {
+        uint32_t nc = ts_node_named_child_count(node);
+        for (uint32_t i = 0; i < nc; i++) {
+            TSNode c = ts_node_named_child(node, i);
+            if (strcmp(ts_node_type(c), "multi_variable_declaration") != 0) {
+                continue;
+            }
+            // One componentN() call per destructured variable.
+            uint32_t vc = ts_node_named_child_count(c);
+            uint32_t comp = 0;
+            for (uint32_t j = 0; j < vc; j++) {
+                TSNode v = ts_node_named_child(c, j);
+                if (strcmp(ts_node_type(v), "variable_declaration") != 0) {
+                    continue;
+                }
+                comp++;
+                kt_push_implicit_call(ctx, node, cbm_arena_sprintf(ctx->arena, "component%u", comp),
+                                      enclosing_func_qn);
+            }
+            break;
+        }
+    } else if (strcmp(kind, "for_statement") == 0) {
+        kt_push_implicit_call(ctx, node, "iterator", enclosing_func_qn);
+        kt_push_implicit_call(ctx, node, "hasNext", enclosing_func_qn);
+        kt_push_implicit_call(ctx, node, "next", enclosing_func_qn);
+    }
+}
+
+// Java method reference `Lhs::name` (e.g. `String::length`, `Foo::new`). The
+// call walk only visits call_expression-like nodes, so a method_reference never
+// becomes a call and the LSP's lsp_method_ref resolution has no call site to
+// attach to. Record a textual call to the referenced method's bare name (the
+// constructor ref `Lhs::new` uses the unnamed `new` token); the LSP join then
+// matches on the bare name. The referenced method IS invoked indirectly, so
+// this is an accurate call edge (mirrors java_lsp.c resolve_method_reference).
+static void extract_java_method_reference(CBMExtractCtx *ctx, TSNode node, const char *kind,
+                                          const char *enclosing_func_qn) {
+    if (strcmp(kind, "method_reference") != 0) {
+        return;
+    }
+    uint32_t nc = ts_node_named_child_count(node);
+    if (nc < 1) {
+        return;
+    }
+    char *mname = NULL;
+    if (nc >= 2) {
+        mname = cbm_node_text(ctx->arena, ts_node_named_child(node, nc - 1), ctx->source);
+    }
+    if (!mname || !mname[0]) {
+        mname = "new"; // constructor reference `Lhs::new` — `new` is unnamed
+    }
+    CBMCall call = {0};
+    call.callee_name = mname;
+    call.enclosing_func_qn = enclosing_func_qn;
+    call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+    cbm_calls_push(&ctx->result->calls, ctx->arena, call);
+}
+
+// ObjectScript: resolve `var.Method(...)` / `..Property.Method(...)` instance
+// calls against the per-method variable type map. Returns arena "Class.Method"
+// or NULL if the receiver's type is unknown.
+static char *resolve_objectscript_instance_call(CBMArena *a, TSNode node, const char *source,
+                                                os_type_map_t *type_map) {
+    TSNode receiver = {0};
+    TSNode oref = {0};
+    const char *nk_first = NULL;
+    for (uint32_t i = 0; i < ts_node_named_child_count(node); i++) {
+        TSNode child = ts_node_named_child(node, i);
+        const char *ck = ts_node_type(child);
+        if (strcmp(ck, "lvn") == 0 || strcmp(ck, "variable") == 0) {
+            receiver = child;
+        } else if (strcmp(ck, "relative_dot_property") == 0) {
+            receiver = child;
+            nk_first = "relative_dot_property";
+        } else if (strcmp(ck, "oref_method") == 0) {
+            oref = child;
+        }
+    }
+    if (ts_node_is_null(oref)) {
+        return NULL;
+    }
+    TSNode method_name_node = cbm_find_child_by_kind(oref, "method_name");
+    if (ts_node_is_null(method_name_node)) {
+        return NULL;
+    }
+    TSNode mn_ident = ts_node_named_child_count(method_name_node) > 0
+                          ? ts_node_named_child(method_name_node, 0)
+                          : (TSNode){0};
+    if (ts_node_is_null(mn_ident)) {
+        return NULL;
+    }
+    char *method = cbm_node_text(a, mn_ident, source);
+    if (!method || !method[0]) {
+        return NULL;
+    }
+    if (ts_node_is_null(receiver)) {
+        return NULL;
+    }
+    char *var_text = NULL;
+    if (nk_first && strcmp(nk_first, "relative_dot_property") == 0) {
+        TSNode prop_name = cbm_find_child_by_kind(receiver, "member_name");
+        if (!ts_node_is_null(prop_name)) {
+            char *pname = cbm_node_text(a, prop_name, source);
+            if (pname && pname[0]) {
+                var_text = cbm_arena_sprintf(a, "..%s", pname);
+            }
+        }
+        if (!var_text) {
+            var_text = cbm_node_text(a, receiver, source);
+        }
+    } else {
+        var_text = cbm_node_text(a, receiver, source);
+    }
+    if (!var_text || !var_text[0]) {
+        return NULL;
+    }
+    for (int i = 0; i < type_map->count; i++) {
+        if (strcasecmp(type_map->entries[i].var_name, var_text) == 0) {
+            return cbm_arena_sprintf(a, "%s.%s", type_map->entries[i].class_name, method);
+        }
+    }
+    return NULL;
+}
+
+/* True when a Python attribute call receiver is safe from the weak-member
+ * guard. Direct self/cls and super() receivers retain class-local semantics.
+ * An imported identifier — including the root of an attribute chain — must
+ * remain eligible for import-map resolution (`helper.compute()`). */
+static bool python_receiver_is_exempt(CBMExtractCtx *ctx, TSNode receiver) {
+    if (ts_node_is_null(receiver)) {
+        return false;
+    }
+
+    if (strcmp(ts_node_type(receiver), "call") == 0) {
+        TSNode fn = ts_node_child_by_field_name(receiver, TS_FIELD("function"));
+        if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "identifier") == 0) {
+            char *name = cbm_node_text(ctx->arena, fn, ctx->source);
+            return name && strcmp(name, "super") == 0;
+        }
+        return false;
+    }
+
+    bool direct_identifier = strcmp(ts_node_type(receiver), "identifier") == 0;
+    TSNode root = receiver;
+    while (!ts_node_is_null(root) && strcmp(ts_node_type(root), "attribute") == 0) {
+        root = ts_node_child_by_field_name(root, TS_FIELD("object"));
+    }
+    if (ts_node_is_null(root) || strcmp(ts_node_type(root), "identifier") != 0) {
+        return false;
+    }
+
+    char *name = cbm_node_text(ctx->arena, root, ctx->source);
+    if (!name) {
+        return false;
+    }
+    if (direct_identifier && (strcmp(name, "self") == 0 || strcmp(name, "cls") == 0)) {
+        return true;
+    }
+    for (int i = 0; i < ctx->result->imports.count; i++) {
+        const char *local_name = ctx->result->imports.items[i].local_name;
+        if (local_name && strcmp(local_name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+>>>>>>> theirs
 void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, WalkState *state) {
     if (!spec->call_node_types || !spec->call_node_types[0]) {
         return;
@@ -1161,6 +1516,53 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
             call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
+<<<<<<< ours
+=======
+            // Perl-only: flag arrow/method calls ($obj->m / Class->m). The
+            // generic short-name resolver cannot place a method without a known
+            // receiver type, so the call-resolution pass suppresses those edges.
+            // Default false for every other language (struct is zero-init).
+            if (ctx->language == CBM_LANG_PERL &&
+                strcmp(ts_node_type(node), "method_call_expression") == 0) {
+                call.is_method = true;
+            }
+            // Python receiver-aware guard (#1276). Imported receivers remain
+            // ordinary calls: module.function() is Python's canonical
+            // cross-file call shape and the import map can resolve it. Unknown
+            // object receivers are flagged so weak short-name matching cannot
+            // fabricate an edge. self/cls/super() keep class-local semantics.
+            if (ctx->language == CBM_LANG_PYTHON && strcmp(ts_node_type(node), "call") == 0) {
+                TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "attribute") == 0) {
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    bool receiver_is_exempt = python_receiver_is_exempt(ctx, obj);
+                    call.is_method = !receiver_is_exempt;
+                }
+            }
+            // TS/JS/TSX receiver-aware guard (#592/#606 direction; same intent
+            // as the Perl flag above). Flag a member call x.foo() whose receiver
+            // is NOT `this`/`super`. When the TS-LSP cannot resolve the receiver
+            // type, the call-resolution pass suppresses weak short-name matches
+            // for these (so `re.test()` cannot fabricate an edge to a project
+            // `test`). this/super receivers stay unflagged — their target is the
+            // enclosing class, where a namespace-proximity weak match is usually
+            // right. Bare calls (helper()) and new_expression have no member
+            // receiver, so they keep is_method=false (struct is zero-init).
+            if ((ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
+                 ctx->language == CBM_LANG_TSX) &&
+                strcmp(ts_node_type(node), "call_expression") == 0) {
+                TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "member_expression") == 0) {
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    if (!ts_node_is_null(obj)) {
+                        const char *ok = ts_node_type(obj);
+                        if (strcmp(ok, "this") != 0 && strcmp(ok, "super") != 0) {
+                            call.is_method = true;
+                        }
+                    }
+                }
+            }
+>>>>>>> theirs
 
             TSNode args = ts_node_child_by_field_name(node, TS_FIELD("arguments"));
             if (!ts_node_is_null(args)) {

@@ -169,6 +169,31 @@ void cbm_registry_resolve_cache_end(void);
 /* Check if a qualified name exists in the registry. */
 bool cbm_registry_exists(const cbm_registry_t *r, const char *qn);
 
+<<<<<<< ours
+=======
+/* True if `name` is one of the curated Perl core builtins (perlfunc). Used by
+ * the call-resolution passes to suppress generic-resolver CALLS edges from Perl
+ * builtin invocations (push/shift/keys/...) to project subs that merely share
+ * the name. Perl-scoped: callers gate on the file language. */
+bool cbm_perl_is_builtin(const char *name);
+
+/* Decide whether a resolved Perl call edge is generic-resolver noise to drop
+ * (#476): true only for Perl, only for a builtin/method call, and only when the
+ * match used a weak short-name strategy — high-confidence same_module/import_map
+ * matches are kept. Pure; unit-tested in test_registry.c. */
+bool cbm_perl_suppress_generic_match(bool is_perl, bool is_method, const char *callee_name,
+                                     const char *strategy);
+
+/* Decide whether a resolved dynamic-language member-call edge is weak-strategy
+ * noise to drop (#592/#606/#1276): true only when the caller enables the guard,
+ * only for a member call with a non-self receiver (is_method), and only when
+ * the match used a weak short-name strategy (suffix_match / unique_name /
+ * field_type_hint / fuzzy).
+ * Explicit drop-list keeps every lsp_* / import / same-module / qualified match.
+ * Pure; unit-tested in test_registry.c. */
+bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy);
+
+>>>>>>> theirs
 /* Get the label of a qualified name, or NULL if not found. */
 const char *cbm_registry_label_of(const cbm_registry_t *r, const char *qn);
 

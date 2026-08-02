@@ -718,6 +718,106 @@ TEST(fuzzy_no_import_map_passthrough) {
     PASS();
 }
 
+<<<<<<< ours
+=======
+/* ── Perl builtin guard (#459 follow-up: call-graph noise) ───────── */
+
+TEST(perl_builtin_set_recognizes_core_builtins) {
+    /* Representative core builtins from across the sorted set. */
+    ASSERT_TRUE(cbm_perl_is_builtin("push"));
+    ASSERT_TRUE(cbm_perl_is_builtin("shift"));
+    ASSERT_TRUE(cbm_perl_is_builtin("keys"));
+    ASSERT_TRUE(cbm_perl_is_builtin("sprintf"));
+    ASSERT_TRUE(cbm_perl_is_builtin("abs"));   /* first element */
+    ASSERT_TRUE(cbm_perl_is_builtin("write")); /* last element */
+    ASSERT_TRUE(cbm_perl_is_builtin("wantarray"));
+    PASS();
+}
+
+TEST(perl_builtin_set_rejects_project_subs) {
+    /* Genuine project sub names and edge inputs must NOT be flagged. */
+    ASSERT_FALSE(cbm_perl_is_builtin("helper"));
+    ASSERT_FALSE(cbm_perl_is_builtin("process_request"));
+    ASSERT_FALSE(cbm_perl_is_builtin("Push")); /* case-sensitive */
+    ASSERT_FALSE(cbm_perl_is_builtin(""));
+    ASSERT_FALSE(cbm_perl_is_builtin(NULL));
+    PASS();
+}
+
+TEST(perl_suppress_drops_weak_builtin_and_method_matches) {
+    /* #476: a builtin/method call that landed via a WEAK short-name strategy is
+     * generic-resolver noise and must be suppressed. */
+    ASSERT_TRUE(cbm_perl_suppress_generic_match(true, false, "push", "suffix_match"));
+    ASSERT_TRUE(cbm_perl_suppress_generic_match(true, false, "keys", "unique_name"));
+    ASSERT_TRUE(cbm_perl_suppress_generic_match(true, true, "commit", "suffix_match"));
+    ASSERT_TRUE(cbm_perl_suppress_generic_match(true, true, "log", "unique_name"));
+    PASS();
+}
+
+TEST(perl_suppress_keeps_high_confidence_and_genuine_calls) {
+    /* #476: high-confidence strategies are kept so a genuine same-file/imported
+     * call to a builtin-named sub still resolves (criterion d). */
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, false, "log", "same_module"));
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, false, "open", "import_map"));
+    /* import_map_suffix is a genuine import resolution (conf 0.85), not a weak
+     * short-name guess — a '::'-qualified call resolved this way must be kept. */
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, true, "Foo::Bar::m", "import_map_suffix"));
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, true, "commit", "same_module"));
+    /* A genuine non-builtin function call is never suppressed (edge survives). */
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, false, "helper", "suffix_match"));
+    /* Non-Perl languages are never affected. */
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(false, false, "push", "suffix_match"));
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(false, true, "commit", "suffix_match"));
+    /* No match (NULL/empty strategy) → nothing to suppress. */
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, false, "push", NULL));
+    ASSERT_FALSE(cbm_perl_suppress_generic_match(true, true, "commit", ""));
+    PASS();
+}
+
+TEST(dynamic_suppress_drops_weak_method_matches) {
+    /* #592/#606/#1276: a dynamic-language member call whose receiver the LSP
+     * could not type, that
+     * landed via a WEAK short-name strategy, is generic-resolver noise → drop.
+     * The strategies that actually reach the guards are the registry's
+     * suffix_match / unique_name and the parallel field_type_hint; "fuzzy" is
+     * covered defensively (cbm_registry_fuzzy_resolve is not wired into the
+     * resolvers today) so a future wiring cannot silently reintroduce it. */
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "suffix_match"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "unique_name"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "field_type_hint"));
+    ASSERT_TRUE(cbm_suppress_weak_member_match(true, true, "fuzzy"));
+    PASS();
+}
+
+TEST(dynamic_suppress_keeps_high_confidence_and_non_methods) {
+    /* Keep every receiver-/import-aware strategy. Because the PARALLEL resolver
+     * runs lsp_* strategies through this same guard variable, an explicit
+     * drop-list must never touch them — asserting the lsp_* keeps here is the
+     * regression guard for the "kills lsp edges" failure mode. The keep set
+     * enumerates the resolver's non-weak strategies: registry
+     * {import_map, import_map_suffix, same_module, qualified_suffix}, parallel
+     * {callee_suffix, service_pattern}, and lsp_*. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "same_module"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "import_map"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "import_map_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "qualified_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "callee_suffix"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "service_pattern"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_ts_method"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_cross"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, "lsp_ts_local"));
+    /* A bare call (is_method=false) is a free-function call → never suppressed. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, false, "unique_name"));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, false, "suffix_match"));
+    /* Languages outside the caller's guard set are never affected. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(false, true, "suffix_match"));
+    /* No match (NULL/empty strategy) → nothing to suppress. */
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, NULL));
+    ASSERT_FALSE(cbm_suppress_weak_member_match(true, true, ""));
+    PASS();
+}
+
+>>>>>>> theirs
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 /* Method call THROUGH an imported symbol that is itself an indexed node
@@ -869,4 +969,15 @@ SUITE(registry) {
     RUN_TEST(fuzzy_resolve_confidence_distance);
     RUN_TEST(fuzzy_penalty_unreachable_import);
     RUN_TEST(fuzzy_no_import_map_passthrough);
+<<<<<<< ours
+=======
+
+    /* Perl builtin guard */
+    RUN_TEST(perl_builtin_set_recognizes_core_builtins);
+    RUN_TEST(perl_builtin_set_rejects_project_subs);
+    RUN_TEST(perl_suppress_drops_weak_builtin_and_method_matches);
+    RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
+    RUN_TEST(dynamic_suppress_drops_weak_method_matches);
+    RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
+>>>>>>> theirs
 }

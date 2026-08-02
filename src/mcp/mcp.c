@@ -1658,26 +1658,10 @@ static bool run_semantic_query_core(const char *args, cbm_store_t *store, const 
     return type_error;
 }
 
-/* Append the semantic_query vector-search results onto the doc.  Returns
- * true if semantic_query was provided as a non-array (type error — caller
- * should surface to the user). */
-static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *args,
-                               cbm_store_t *store, const char *project, int limit) {
-    cbm_vector_result_t *vresults = NULL;
-    int vcount = 0;
-    bool type_error = run_semantic_query_core(
-        args, store, project, limit, CBM_VECTOR_SEARCH_SIDECAR, &vresults, &vcount, NULL, NULL);
-    if (vcount > 0) {
-        emit_vector_results(doc, root, "semantic_results", vresults, 0, vcount);
-        cbm_store_free_vector_results(vresults, vcount);
-    }
-    return type_error;
-}
-
 /* ── TOON output for search_graph ───────────────────────────────────
- * Default response encoding: header+rows tables (compact_out.h). The
- * verbose per-node JSON objects remain available via format:"json" and
- * are forced for include_connected=true (nested neighbor lists). */
+ * Default response encoding: grouped tree rows (compact_out.h). The same
+ * model is available as structured JSON via format:"json"; include_connected
+ * adds a `connected` column in BOTH encodings. */
 
 enum { SG_MAX_EXTRA_FIELDS = 12 };
 
@@ -1868,6 +1852,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         .min_degree = min_degree,
         .max_degree = max_degree,
     };
+    bool has_structural_filters = label || name_pattern || qn_pattern || file_pattern ||
+                                  relationship || exclude_entry_points ||
+                                  min_degree != CBM_NOT_FOUND || max_degree != CBM_NOT_FOUND;
 
     bool has_filters = (label && label[0]) || name_pattern || qn_pattern || file_pattern ||
                        relationship || exclude_entry_points || include_connected ||
@@ -1948,7 +1935,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
             /* Semantic-only calls get semantic results only: the legacy
              * behavior also ran the UNFILTERED regex search and prepended
              * up to `limit` unrelated enriched nodes to the response. */
-            bool semantic_only = sq_present && !has_filters;
+            bool semantic_only = sq_present && !has_structural_filters;
 
             cbm_sb_t sb;
             cbm_sb_init(&sb);
@@ -2032,8 +2019,32 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
             true);
     }
 
+    cbm_vector_result_t *vresults = NULL;
+    int vcount = 0;
+    bool sq_present = false;
+    bool sq_type_error = run_semantic_query_core(args, store, project, limit,
+                                               CBM_VECTOR_SEARCH_SIDECAR, &vresults, &vcount,
+                                               NULL, &sq_present);
+    if (sq_type_error) {
+        free(project);
+        free(label);
+        free(name_pattern);
+        free(qn_pattern);
+        free(file_pattern);
+        free(relationship);
+        return cbm_mcp_text_result(
+            "semantic_query must be an array of keyword strings, e.g. "
+            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
+            "into individual keywords; each is scored independently via per-keyword "
+            "min-cosine.",
+            true);
+    }
+
+    bool semantic_only = sq_present && !has_structural_filters;
     cbm_search_output_t out = {0};
-    cbm_store_search(store, &params, &out);
+    if (!semantic_only) {
+        cbm_store_search(store, &params, &out);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -2062,27 +2073,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         }
     }
 
-    bool sq_type_error = run_semantic_query(doc, root, args, store, project, limit);
-
-    if (sq_type_error) {
-        for (int pi = 0; pi < props_doc_count; pi++) {
-            yyjson_doc_free(props_docs[pi]);
-        }
-        free(props_docs);
-        yyjson_mut_doc_free(doc);
-        cbm_store_search_free(&out);
-        free(project);
-        free(label);
-        free(name_pattern);
-        free(qn_pattern);
-        free(file_pattern);
-        free(relationship);
-        return cbm_mcp_text_result(
-            "semantic_query must be an array of keyword strings, e.g. "
-            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
-            "into individual keywords; each is scored independently via per-keyword "
-            "min-cosine.",
-            true);
+    if (vcount > 0) {
+        emit_semantic_results(doc, root, vresults, vcount);
+        cbm_store_free_vector_results(vresults, vcount);
     }
 
     char *json = yy_doc_to_str(doc);
