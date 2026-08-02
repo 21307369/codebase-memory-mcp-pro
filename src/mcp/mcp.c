@@ -448,9 +448,21 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
 
+<<<<<<< ours
     {"list_projects", "List all indexed projects", "{\"type\":\"object\",\"properties\":{}}"},
 
     {"delete_project", "Delete a project from the index",
+=======
+    {"list_projects", "List projects", "List indexed projects with deterministic pagination",
+     "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\","
+     "\"minimum\":0,\"default\":0},"
+     "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":50},"
+     "\"include_details\":{\"type\":\"boolean\",\"default\":false,"
+     "\"description\":\"Include branch, node/edge counts and database size. Slower.\"},"
+     "\"metadata_only\":{\"type\":\"boolean\",\"description\":\"Deprecated compatibility "
+     "alias for include_details=false.\"}}}"},
+    {"delete_project", "Delete project", "Delete a project from the index",
+>>>>>>> theirs
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
 
@@ -990,9 +1002,15 @@ static bool is_project_db_file(const char *name, size_t len) {
 /* Open a .db file briefly, collect node/edge counts and root_path,
  * then append a JSON entry to arr. */
 static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
+<<<<<<< ours
                                      const char *name, size_t name_len, const struct stat *st) {
     char project_name[CBM_SZ_1K];
     snprintf(project_name, sizeof(project_name), "%.*s", (int)(name_len - 3), name);
+=======
+                                     const char *name, size_t name_len, int64_t size_bytes,
+                                     bool include_details) {
+    (void)name_len;
+>>>>>>> theirs
 
     char full_path[CBM_SZ_2K];
     snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
@@ -1000,8 +1018,12 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     cbm_store_t *pstore = cbm_store_open_path(full_path);
     int nodes = 0;
     int edges = 0;
+<<<<<<< ours
     char root_path_buf[CBM_SZ_1K] = "";
     if (pstore) {
+=======
+    if (include_details) {
+>>>>>>> theirs
         nodes = cbm_store_count_nodes(pstore, project_name);
         edges = cbm_store_count_edges(pstore, project_name);
         cbm_project_t proj = {0};
@@ -1019,18 +1041,68 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     yyjson_mut_val *p = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, p, "name", project_name);
     yyjson_mut_obj_add_strcpy(doc, p, "root_path", root_path_buf);
+<<<<<<< ours
     add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
     yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
     yyjson_mut_obj_add_int(doc, p, "edges", edges);
     yyjson_mut_obj_add_int(doc, p, "size_bytes", (int64_t)st->st_size);
+=======
+    /* Listing stays lean: only the branch (the one git fact that
+     * disambiguates same-repo projects). The 12-field git block — mostly
+     * null for non-git roots — cost ~10KB across a full cache and is one
+     * index_status call away for the project you actually care about. */
+    if (include_details && root_path_buf[0]) {
+        cbm_git_context_t gctx = {0};
+        (void)cbm_git_context_resolve(root_path_buf, &gctx);
+        if (gctx.is_git && gctx.branch) {
+            yyjson_mut_obj_add_strcpy(doc, p, "branch", gctx.branch);
+        }
+        cbm_git_context_free(&gctx);
+    }
+    if (include_details) {
+        yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
+        yyjson_mut_obj_add_int(doc, p, "edges", edges);
+        yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
+    }
+>>>>>>> theirs
     yyjson_mut_arr_add_val(arr, p);
+}
+
+static int project_db_name_cmp(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
 }
 
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     (void)srv;
+<<<<<<< ours
     (void)args;
+=======
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 50);
+    bool include_details = cbm_mcp_get_bool_arg(args, "include_details");
+    yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
+    yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
+    yyjson_val *metadata_value =
+        args_root && yyjson_is_obj(args_root) ? yyjson_obj_get(args_root, "metadata_only") : NULL;
+    if (metadata_value && yyjson_is_true(metadata_value)) {
+        include_details = false;
+    }
+    if (args_doc) {
+        yyjson_doc_free(args_doc);
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (limit < 1) {
+        limit = 1;
+    } else if (limit > 100) {
+        limit = 100;
+    }
+>>>>>>> theirs
 
     char dir_path[CBM_SZ_1K];
     cache_dir(dir_path, sizeof(dir_path));
@@ -1052,6 +1124,10 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(msg, true);
     }
 
+    char **db_names = NULL;
+    size_t db_count = 0;
+    size_t db_cap = 0;
+    bool name_collection_failed = false;
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
         const char *name = entry->name;
@@ -1059,17 +1135,69 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (!is_project_db_file(name, len)) {
             continue;
         }
+        if (db_count == db_cap) {
+            size_t next_cap = db_cap ? db_cap * 2 : 64;
+            char **grown = realloc(db_names, next_cap * sizeof(*db_names));
+            if (!grown) {
+                name_collection_failed = true;
+                break;
+            }
+            db_names = grown;
+            db_cap = next_cap;
+        }
+        db_names[db_count] = heap_strdup(name);
+        if (!db_names[db_count]) {
+            name_collection_failed = true;
+            break;
+        }
+        db_count++;
+    }
+    cbm_closedir(d);
+
+    if (name_collection_failed) {
+        for (size_t i = 0; i < db_count; i++) {
+            free(db_names[i]);
+        }
+        free(db_names);
+        yyjson_mut_doc_free(doc);
+        return cbm_mcp_text_result(
+            "{\"error\":\"out of memory while collecting indexed projects\"}", true);
+    }
+
+    if (db_count > 1) {
+        qsort(db_names, db_count, sizeof(*db_names), project_db_name_cmp);
+    }
+    size_t start = (size_t)offset < db_count ? (size_t)offset : db_count;
+    size_t end = start + (size_t)limit;
+    if (end > db_count) {
+        end = db_count;
+    }
+    for (size_t i = start; i < end; i++) {
+        const char *name = db_names[i];
+        size_t len = strlen(name);
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
         struct stat st;
         if (stat(full_path, &st) != 0) {
             continue;
         }
+<<<<<<< ours
         build_project_json_entry(doc, arr, dir_path, name, len, &st);
+=======
+        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, include_details);
+>>>>>>> theirs
     }
-    cbm_closedir(d);
+    for (size_t i = 0; i < db_count; i++) {
+        free(db_names[i]);
+    }
+    free(db_names);
 
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
+    yyjson_mut_obj_add_uint(doc, root, "total", db_count);
+    yyjson_mut_obj_add_int(doc, root, "offset", offset);
+    yyjson_mut_obj_add_int(doc, root, "limit", limit);
+    yyjson_mut_obj_add_uint(doc, root, "returned", yyjson_mut_arr_size(arr));
+    yyjson_mut_obj_add_bool(doc, root, "has_more", end < db_count);
 
     /* Guide user when no projects are indexed */
     if (yyjson_mut_arr_size(arr) == 0) {

@@ -1933,6 +1933,7 @@ TEST(snippet_exact_qn) {
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
     ASSERT_NOT_NULL(srv);
 
+<<<<<<< ours
     char *resp =
         call_snippet(srv, "{\"qualified_name\":\"test-project.cmd.server.main.HandleRequest\","
                           "\"project\":\"test-project\"}");
@@ -1948,6 +1949,87 @@ TEST(snippet_exact_qn) {
     ASSERT_NOT_NULL(strstr(resp, "\"callers\":0"));
     ASSERT_NOT_NULL(strstr(resp, "\"callees\":2"));
     free(resp);
+=======
+    /* ── A: list_projects reports INTERNAL names; filters the ghost ── */
+    char *list =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"list_projects\",\"arguments\":{}}}");
+    ASSERT_NOT_NULL(list);
+    ASSERT_NOT_NULL(strstr(list, "alpha704")); /* control */
+    ASSERT_NOT_NULL(strstr(list, "beta704"));  /* internal name of drifted db (RED before) */
+    ASSERT_NULL(strstr(list, "gamma704"));     /* filename must NOT be advertised (RED before) */
+    ASSERT_NULL(strstr(list, "ghost704"));     /* 0-byte ghost filtered (RED before) */
+    free(list);
+
+    char *page = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"list_projects\","
+             "\"arguments\":{\"offset\":0,\"limit\":1}}}");
+    ASSERT_NOT_NULL(page);
+    ASSERT_NOT_NULL(strstr(page, "\\\"total\\\":3"));
+    ASSERT_NOT_NULL(strstr(page, "\\\"limit\\\":1"));
+    ASSERT_NOT_NULL(strstr(page, "\\\"returned\\\":1"));
+    ASSERT_NOT_NULL(strstr(page, "\\\"has_more\\\":true"));
+    ASSERT_NOT_NULL(strstr(page, "alpha704"));
+    ASSERT_NULL(strstr(page, "beta704"));
+    ASSERT_NULL(strstr(page, "\\\"nodes\\\"")); /* details are opt-in */
+    free(page);
+
+    char *next_page = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"list_projects\","
+             "\"arguments\":{\"offset\":1,\"limit\":1,\"metadata_only\":true}}}");
+    ASSERT_NOT_NULL(next_page);
+    ASSERT_NOT_NULL(strstr(next_page, "beta704"));
+    ASSERT_NULL(strstr(next_page, "alpha704"));
+    ASSERT_NULL(strstr(next_page, "\\\"nodes\\\"")); /* compatibility alias stays lean */
+    free(next_page);
+
+    char *details = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"list_projects\","
+             "\"arguments\":{\"offset\":0,\"limit\":1,\"include_details\":true}}}");
+    ASSERT_NOT_NULL(details);
+    ASSERT_NOT_NULL(strstr(details, "\\\"nodes\\\""));
+    free(details);
+
+    /* ── B: the drifted project resolves by its INTERNAL name ──────── */
+    char *q_beta = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
+             "\"project\":\"beta704\",\"name_pattern\":\"betaFunc704\",\"limit\":5}}}");
+    ASSERT_NOT_NULL(q_beta);
+    ASSERT_NOT_NULL(strstr(q_beta, "betaFunc704")); /* resolved + returned node (RED before) */
+    ASSERT_NULL(strstr(q_beta, "not found"));       /* not the not-found error */
+    free(q_beta);
+
+    /* ── C: control project still resolves on the fast path ────────── */
+    char *q_alpha = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
+             "\"project\":\"alpha704\",\"name_pattern\":\"alphaFunc704\",\"limit\":5}}}");
+    ASSERT_NOT_NULL(q_alpha);
+    ASSERT_NOT_NULL(strstr(q_alpha, "alphaFunc704"));
+    free(q_alpha);
+
+    /* ── D: the 0-byte ghost is NOT resolvable ─────────────────────── */
+    char *q_ghost = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
+             "\"project\":\"ghost704\",\"name_pattern\":\".*\",\"limit\":5}}}");
+    ASSERT_NOT_NULL(q_ghost);
+    ASSERT_NOT_NULL(strstr(q_ghost, "not found"));
+    free(q_ghost);
+
+    /* ── E: addressing the drifted db by its FILENAME stays not-found ── */
+    char *q_gamma = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\",\"arguments\":{"
+             "\"project\":\"gamma704\",\"name_pattern\":\".*\",\"limit\":5}}}");
+    ASSERT_NOT_NULL(q_gamma);
+    ASSERT_NOT_NULL(strstr(q_gamma, "not found"));
+    free(q_gamma);
+>>>>>>> theirs
 
     cbm_mcp_server_free(srv);
     cleanup_snippet_dir(tmp);
