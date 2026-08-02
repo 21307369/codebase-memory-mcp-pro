@@ -4199,6 +4199,124 @@ static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, bindin
     *bind_count = new_count;
 }
 
+/* Drive a single-relationship additional pattern from its ALREADY-BOUND
+ * terminal node, binding the unbound START var to the edge's other endpoint.
+ *
+ * Handles `OPTIONAL MATCH (c)-[:CALLS]->(f)` where `f` is bound from an earlier
+ * MATCH and `c` is new: scanning every node for `c` and cross-joining (a) risks
+ * an int-overflow OOB write on large graphs and (b) leaves `c` bound to an
+ * arbitrary node so a later `WHERE c IS NULL` wrongly drops every row (#627).
+ * Instead we scan only the bound terminal's edges and bind `c` to real
+ * neighbours; with OPTIONAL we keep the row with `c` unbound when there are
+ * none — the correct dead-code semantics. */
+static void expand_from_bound_terminal(cbm_store_t *store, cbm_pattern_t *patn,
+                                       binding_t **bindings, int *bind_count, const char *start_var,
+                                       bool opt) {
+    cbm_rel_pattern_t *rel = &patn->rels[0];
+    const cbm_node_pattern_t *start_node = &patn->nodes[0];
+    /* The relationship is written start-[r]->terminal. To enumerate the start
+     * nodes reachable from the bound terminal we invert the stored direction. */
+    bool rel_inbound = rel->direction && strcmp(rel->direction, "inbound") == 0;
+    bool scan_targets =
+        !rel_inbound; /* (start)->(term): start = edge source = scan term's inbound */
+
+    /* Size this hop's output for BOTH writers without dropping any row: the
+     * materialised expansion is capped at max_new = *bind_count * 10 rows (only
+     * the WRITE is gated on max_new; match DETECTION below is not, so a full
+     * buffer never hides a real neighbour), and the OPTIONAL fallback
+     * emits at most one row per source (<= *bind_count). A source either matches
+     * (feeds the expansion) or takes the fallback, never both, so the two counts
+     * are additive and bounded by max_new + *bind_count. Computed in size_t so
+     * the product cannot overflow.
+     * The previous "+ SKIP_ONE" sizing tied max_new to the whole buffer, so once
+     * the expansion saturated it the fallback guard silently dropped every later
+     * OPTIONAL no-match row (a data-loss bug, not an OOB — the fallback stayed
+     * in-bounds behind that guard) — exactly the rows
+     * `OPTIONAL MATCH ... WHERE <start> IS NULL` is meant to surface. */
+    size_t alloc_n = (size_t)*bind_count * (size_t)CYP_GROWTH_10 + (size_t)*bind_count;
+    binding_t *new_bindings = malloc(alloc_n * sizeof(binding_t));
+    if (!new_bindings) {
+        return;
+    }
+    int new_count = 0;
+    int max_new = *bind_count * CYP_GROWTH_10;
+
+    for (int bi = 0; bi < *bind_count; bi++) {
+        binding_t *b = &(*bindings)[bi];
+        cbm_node_t *term = binding_get(b, patn->nodes[1].variable ? patn->nodes[1].variable : "");
+        int match_count = 0;
+        if (term) {
+            /* Detection is decoupled from the write budget: scan every edge and
+             * type unconditionally so match_count reflects the true neighbour
+             * count, and gate only the WRITE on the ceiling (below). If detection
+             * stopped at max_new too, a saturated buffer would leave match_count at
+             * 0 for a terminal that actually has callers, and the fallback below
+             * would fabricate an UNBOUND "dead code" row for live code — worse than
+             * dropping a row. */
+            for (int ti = 0; ti < (rel->type_count > 0 ? rel->type_count : 1); ti++) {
+                cbm_edge_t *edges = NULL;
+                int edge_count = 0;
+                if (rel->type_count > 0) {
+                    if (scan_targets) {
+                        cbm_store_find_edges_by_target_type(store, term->id, rel->types[ti], &edges,
+                                                            &edge_count);
+                    } else {
+                        cbm_store_find_edges_by_source_type(store, term->id, rel->types[ti], &edges,
+                                                            &edge_count);
+                    }
+                } else if (scan_targets) {
+                    cbm_store_find_edges_by_target(store, term->id, &edges, &edge_count);
+                } else {
+                    cbm_store_find_edges_by_source(store, term->id, &edges, &edge_count);
+                }
+                for (int ei = 0; ei < edge_count; ei++) {
+                    int64_t sid = scan_targets ? edges[ei].source_id : edges[ei].target_id;
+                    cbm_node_t found = {0};
+                    if (cbm_store_find_node_by_id(store, sid, &found) != CBM_STORE_OK) {
+                        continue;
+                    }
+                    if (start_node->label && !label_alt_matches(found.label, start_node->label)) {
+                        node_fields_free(&found);
+                        continue;
+                    }
+                    match_count++;
+                    if (new_count < max_new) {
+                        binding_t nb = {0};
+                        binding_copy(&nb, b);
+                        binding_set(&nb, start_var, &found);
+                        if (rel->variable) {
+                            binding_set_edge(&nb, rel->variable, &edges[ei]);
+                        }
+                        new_bindings[new_count++] = nb;
+                    }
+                    node_fields_free(&found);
+                }
+                cbm_store_free_edges(edges, edge_count);
+            }
+        }
+        if (opt && match_count == 0) {
+            /* GENUINELY no matching neighbour: the scan above runs unconditionally,
+             * so match_count is the true neighbour count and match_count == 0 here
+             * means the terminal really has none — not merely that the buffer filled
+             * first. Keep the row with start_var left UNBOUND
+             * so `WHERE <start> IS NULL` correctly identifies the no-edge case. The
+             * buffer is sized max_new + *bind_count precisely so every fallback row
+             * has a slot — no guard needed, and no OPTIONAL no-match row is dropped
+             * even after the expansion has saturated max_new. */
+            binding_t nb = {0};
+            binding_copy(&nb, b);
+            new_bindings[new_count++] = nb;
+        }
+    }
+
+    for (int bi = 0; bi < *bind_count; bi++) {
+        binding_free(&(*bindings)[bi]);
+    }
+    free(*bindings);
+    *bindings = new_bindings;
+    *bind_count = new_count;
+}
+
 /* Expand additional MATCH patterns (pi >= 1) */
 static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const char *project,
                                        int max_rows, binding_t **bindings, int *bind_count,
