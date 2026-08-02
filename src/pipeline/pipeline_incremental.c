@@ -629,44 +629,83 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
  * Mode-skipped hash rows are preserved across the rebuild so subsequent
  * reindexes can correctly distinguish "never indexed" from "indexed but
  * not visited this pass". */
-static void dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
+static int dump_and_persist(cbm_gbuf_t *gbuf, const char *db_path, const char *project,
                              cbm_file_info_t *files, int file_count,
                              const cbm_file_hash_t *mode_skipped, int mode_skipped_count,
                              const char *repo_path) {
     struct timespec t;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
 
-    cbm_unlink(db_path);
+    /* Preserve ADR content stored in project_summaries before replacing the DB. */
+    char *saved_adr = NULL;
+    cbm_store_t *adr_store = cbm_store_open_path(db_path);
+    if (adr_store) {
+        cbm_adr_t existing = {0};
+        if (cbm_store_adr_get(adr_store, project, &existing) == CBM_STORE_OK) {
+            if (existing.content) {
+                saved_adr = strdup(existing.content);
+            }
+            cbm_store_adr_free(&existing);
+        }
+        cbm_store_close(adr_store);
+    }
+
+    int rc = CBM_STORE_ERR;
+
     char wal[INCR_WAL_BUF];
     char shm[INCR_WAL_BUF];
     snprintf(wal, sizeof(wal), "%s-wal", db_path);
     snprintf(shm, sizeof(shm), "%s-shm", db_path);
+    if (cbm_unlink(db_path) != 0 && errno != ENOENT) {
+        cbm_log_error("incremental.err", "msg", "clear_staging_failed", "path", db_path);
+        goto cleanup;
+    }
     cbm_unlink(wal);
     cbm_unlink(shm);
 
     int dump_rc = cbm_gbuf_dump_to_sqlite(gbuf, db_path);
     cbm_log_info("incremental.dump", "rc", itoa_buf(dump_rc), "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t)));
+    if (dump_rc != 0) {
+        rc = dump_rc;
+        goto cleanup;
+    }
 
     cbm_store_t *hash_store = cbm_store_open_path(db_path);
-    if (hash_store) {
-        persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
+    if (!hash_store) {
+        cbm_log_error("incremental.err", "msg", "open_staging_after_dump", "path", db_path);
+        goto cleanup;
+    }
+    bool adr_restore_failed = false;
+    /* #992: restore the captured ADR before persisting hashes, mirroring the
+     * full-reindex path (#516) -- the DB replacement above dropped it. */
+    if (saved_adr && cbm_store_adr_store(hash_store, project, saved_adr) != CBM_STORE_OK) {
+        cbm_log_error("incremental.err", "msg", "adr_restore", "project", project);
+        adr_restore_failed = true;
+    }
 
-        /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
-         * any triggers that could have kept nodes_fts synchronized, so we
-         * rebuild from the nodes table here (also indexing prose bodies for
-         * content search — see cbm_store_fts_rebuild and #518/#519). */
-        cbm_store_fts_rebuild(hash_store);
+    rc = persist_hashes(hash_store, project, files, file_count, mode_skipped, mode_skipped_count);
 
-        cbm_store_close(hash_store);
+    /* FTS5 rebuild after incremental dump.  The btree dump path bypasses
+     * any triggers that could have kept nodes_fts synchronized, so we
+     * rebuild from the nodes table here (also indexing prose bodies for
+     * content search — see cbm_store_fts_rebuild and #518/#519). */
+    cbm_store_fts_rebuild(hash_store);
+
+    cbm_store_close(hash_store);
+    if (adr_restore_failed) {
+        rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
 
     /* Auto-update artifact if one already exists (persistence was enabled previously) */
     if (repo_path && cbm_artifact_exists(repo_path)) {
         cbm_artifact_export(db_path, repo_path, project, CBM_ARTIFACT_FAST);
     }
-}
 
+cleanup:
+    free(saved_adr);
+    return rc;
+}
 /* ── Incremental pipeline entry point ────────────────────────────── */
 
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,

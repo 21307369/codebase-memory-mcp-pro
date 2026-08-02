@@ -31,6 +31,11 @@
 #define CBM_MS_PER_SEC 1000.0
 #define CBM_US_PER_SEC_F 1e6
 
+/* Incremental dump could not restore the captured ADR into the rebuilt DB —
+ * keep the staging DB (do NOT fall through to a full reindex that deletes it).
+ * Merged from upstream PR #992. */
+#define CBM_PIPELINE_ABORT_PRESERVE_DB (-2)
+
 /* ── Pipeline context (internal) ─────────────────────────────────── */
 
 /* Per-worker manifest collection entry. */

@@ -1057,6 +1057,12 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
 
     /* Check for existing DB → try incremental or delete for reindex */
     rc = try_incremental_or_delete_db(p, files, file_count);
+    if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
+        /* ADR restore failed on the incremental path — keep the staged DB
+         * instead of falling through to a full reindex (which deletes it). */
+        cbm_discover_free(files, file_count);
+        return rc;
+    }
     if (rc >= 0) {
         cbm_discover_free(files, file_count);
         return rc;
