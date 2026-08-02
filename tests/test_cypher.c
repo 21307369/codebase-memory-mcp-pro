@@ -1293,21 +1293,6 @@ TEST(cypher_exec_var_length_explicit_bound_capped) {
     PASS();
 }
 
-TEST(cypher_exec_variable_length_repeated_node_var_unifies) {
-    cbm_store_t *s = setup_cypher_store();
-    cbm_cypher_result_t r = {0};
-
-    int rc = cbm_cypher_execute(s,
-                                "MATCH (f:Function)-[:CALLS*1..2]->(f:Function) "
-                                "RETURN f.name",
-                                "test", 0, &r);
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(r.row_count, 0);
-
-    cbm_cypher_result_free(&r);
-    cbm_store_close(s);
-    PASS();
-}
 
 TEST(cypher_exec_var_length_no_reuse_self_loop) {
     cbm_store_t *s = cbm_store_open_memory();
@@ -3234,7 +3219,6 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_variable_length);
     RUN_TEST(cypher_exec_variable_length_repeated_node_var_unifies);
     RUN_TEST(cypher_exec_var_length_explicit_bound_capped);
-    RUN_TEST(cypher_exec_variable_length_repeated_node_var_unifies);
     RUN_TEST(cypher_exec_var_length_no_reuse_self_loop);
     RUN_TEST(cypher_exec_defines_edge);
     RUN_TEST(cypher_exec_no_results);
