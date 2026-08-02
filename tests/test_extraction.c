@@ -2925,6 +2925,221 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* Issue #1005: JAX-RS splits a route across two annotations (@GET carries the
+ * verb, a sibling @Path carries the path). Returning on the first mapping
+ * annotation dropped every method-level @Path, and the class-level @Path
+ * prefix was never recognized at all. */
+TEST(extract_java_jaxrs_path_composition_issue1005) {
+    CBMFileResult *r = extract("import jakarta.ws.rs.GET;\n"
+                               "import jakarta.ws.rs.Path;\n"
+                               "@Path(\"/api/v1/widgets\")\n"
+                               "public class WidgetResource {\n"
+                               "  @GET\n"
+                               "  public String list() { return \"\"; }\n"
+                               "  @GET\n"
+                               "  @Path(\"/count\")\n"
+                               "  public String count() { return \"\"; }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "WidgetResource.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *list = find_def_by_name(r, "list");
+    ASSERT_NOT_NULL(list);
+    ASSERT_NOT_NULL(list->route_path);
+    ASSERT_STR_EQ(list->route_path, "/api/v1/widgets");
+    ASSERT_STR_EQ(list->route_method, "GET");
+    const CBMDefinition *count = find_def_by_name(r, "count");
+    ASSERT_NOT_NULL(count);
+    ASSERT_NOT_NULL(count->route_path);
+    ASSERT_STR_EQ(count->route_path, "/api/v1/widgets/count");
+    ASSERT_STR_EQ(count->route_method, "GET");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Find an in-body call by its raw callee text; returns the call or NULL. */
+static const CBMCall *find_call_by_callee(CBMFileResult *r, const char *callee) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, callee) == 0) {
+            return &r->calls.items[i];
+        }
+    }
+    return NULL;
+}
+
+/* Issue #1009: URL-builder helper pattern — a function returning a URL-shaped
+ * literal, consumed as client(buildPath(id)). The builder's URL is recorded in
+ * the per-file constant map and resolved at the call site, for both return
+ * statements and arrow expression bodies. */
+TEST(extract_ts_url_builder_issue1009) {
+    CBMFileResult *r = extract("function thingDetail(id: string): string {\n"
+                               "  return `/api/v1/things/${id}/detail`;\n"
+                               "}\n"
+                               "const arrowPath = (id: string) => `/api/v1/arrows/${id}`;\n"
+                               "export function useThing(id: string) {\n"
+                               "  return apiGet(thingDetail(id));\n"
+                               "}\n"
+                               "export function useArrow(id: string) {\n"
+                               "  return apiFetch(arrowPath(id));\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "builders.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c1 = find_call_by_callee(r, "apiGet");
+    ASSERT_NOT_NULL(c1);
+    ASSERT_NOT_NULL(c1->first_string_arg);
+    ASSERT_STR_EQ(c1->first_string_arg, "/api/v1/things/{}/detail");
+    const CBMCall *c2 = find_call_by_callee(r, "apiFetch");
+    ASSERT_NOT_NULL(c2);
+    ASSERT_NOT_NULL(c2->first_string_arg);
+    ASSERT_STR_EQ(c2->first_string_arg, "/api/v1/arrows/{}");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Issue #1009 (composed builders): a builder whose template inlines an earlier
+ * builder's call plus a query string: `return \`${basePath(id)}?${params}\``.
+ * The known-substitution is inlined and the query string is truncated, so the
+ * resolved URL joins the server route exactly. */
+TEST(extract_ts_url_builder_composed_issue1009) {
+    CBMFileResult *r = extract("function activityPath(id: string): string {\n"
+                               "  return `/api/v1/team-members/${id}/activity`;\n"
+                               "}\n"
+                               "function buildPath(id: string, cursor: string): string {\n"
+                               "  const params = new URLSearchParams();\n"
+                               "  params.set('cursor', cursor);\n"
+                               "  return `${activityPath(id)}?${params.toString()}`;\n"
+                               "}\n"
+                               "export function useActivity(id: string, cursor: string) {\n"
+                               "  return apiGet(buildPath(id, cursor));\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "composed.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "apiGet");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/v1/team-members/{}/activity");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Issue #1006: JS/TS template-literal URLs must flatten ${...} substitutions
+ * to the canonical "{}" placeholder, both as call arguments (HTTP_CALLS) and
+ * as URL-shaped string_refs collected from const/return positions. */
+TEST(extract_ts_template_string_url_issue1006) {
+    CBMFileResult *r = extract("export function detailPath(id: string): string {\n"
+                               "  return `/api/v1/things/${id}/detail`;\n"
+                               "}\n"
+                               "export function load(id: string) {\n"
+                               "  return fetch(`/api/v1/things/${id}`);\n"
+                               "}\n",
+                               CBM_LANG_TYPESCRIPT, "t", "paths.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMCall *c = find_call_by_callee(r, "fetch");
+    ASSERT_NOT_NULL(c);
+    ASSERT_NOT_NULL(c->first_string_arg);
+    ASSERT_STR_EQ(c->first_string_arg, "/api/v1/things/{}");
+    int found = 0;
+    for (int i = 0; i < r->string_refs.count; i++) {
+        if (r->string_refs.items[i].value &&
+            strcmp(r->string_refs.items[i].value, "/api/v1/things/{}/detail") == 0) {
+            found = 1;
+            break;
+        }
+    }
+    ASSERT(found);
+    cbm_free_result(r);
+    PASS();
+}
+
+
+/* Reproduce-first: Java module QN must derive from the CONTAINING DIRECTORY, not
+ * the filename stem, so a top-level class `Outer` in `Outer.java` is `t.Outer`,
+ * NOT the doubled `t.Outer.Outer`. The nested method def QN must also equal the
+ * QN the textual calls-enclosing path records for an in-body call (the
+ * lsp_resolve join keys on exact caller_qn == enclosing_func_qn equality). */
+TEST(extract_java_no_double_class_qn) {
+    CBMFileResult *r = extract("class Outer {\n"
+                               "    int helper(int x) { return x + 2; }\n"
+                               "    class Inner {\n"
+                               "        int run(int v) { return helper(v); }\n"
+                               "    }\n"
+                               "}\n",
+                               CBM_LANG_JAVA, "t", "Outer.java");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* Module QN is the directory (root) → just the project. */
+    ASSERT_NOT_NULL(r->module_qn);
+    ASSERT_STR_EQ(r->module_qn, "t");
+
+    /* No def QN anywhere may double the top-level class name. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *qn = r->defs.items[i].qualified_name;
+        if (qn) {
+            ASSERT_EQ(strstr(qn, "Outer.Outer"), NULL);
+        }
+    }
+
+    /* The nested class and its method carry the single-form QN. */
+    const CBMDefinition *outer = find_def_by_name(r, "Outer");
+    ASSERT_NOT_NULL(outer);
+    ASSERT_STR_EQ(outer->qualified_name, "t.Outer");
+
+    const CBMDefinition *run = find_def_by_name(r, "run");
+    ASSERT_NOT_NULL(run);
+    ASSERT_STR_EQ(run->qualified_name, "t.Outer.Inner.run");
+
+    /* The in-body call to helper() must be attributed to the SAME QN as the
+     * method def — this is the equality the LSP cross-resolution join relies on
+     * for nested classes (the lsp_outer_dispatch repro). */
+    const CBMCall *call = find_call_by_callee(r, "helper");
+    ASSERT_NOT_NULL(call);
+    ASSERT_NOT_NULL(call->enclosing_func_qn);
+    ASSERT_STR_EQ(call->enclosing_func_qn, run->qualified_name);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Reproduce-first: Go module QN must derive from the CONTAINING DIRECTORY
+ * (package), not the filename stem, so a type/method in `myapp/db/conn.go`
+ * belongs to module `proj.myapp.db` and is NOT polluted with the `.conn.`
+ * filename segment. */
+TEST(extract_go_no_filename_in_module_qn) {
+    CBMFileResult *r = extract("package db\n\n"
+                               "type Conn struct{}\n\n"
+                               "func (c *Conn) Query() {}\n",
+                               CBM_LANG_GO, "proj", "myapp/db/conn.go");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    /* Module is the directory `myapp/db`, NOT `myapp/db/conn`. */
+    ASSERT_NOT_NULL(r->module_qn);
+    ASSERT_STR_EQ(r->module_qn, "proj.myapp.db");
+
+    /* The type and method QNs must not contain the filename segment `.conn.`. */
+    const CBMDefinition *conn = find_def_by_name(r, "Conn");
+    ASSERT_NOT_NULL(conn);
+    ASSERT_STR_EQ(conn->qualified_name, "proj.myapp.db.Conn");
+
+    /* Go method nodes keep a FLAT QN (module + name) with a separate
+     * parent_class link to the receiver type — the QN must carry the
+     * directory-based module and NOT the `.conn.` filename segment. */
+    const CBMDefinition *query = find_def_by_name(r, "Query");
+    ASSERT_NOT_NULL(query);
+    ASSERT_STR_EQ(query->qualified_name, "proj.myapp.db.Query");
+    ASSERT_EQ(strstr(query->qualified_name, ".conn."), NULL);
+    /* The method's parent_class must match the type node QN (for DEFINES_METHOD). */
+    ASSERT_NOT_NULL(query->parent_class);
+    ASSERT_STR_EQ(query->parent_class, "proj.myapp.db.Conn");
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Issue #213: large TS files were indexed as a File node with zero children. */
 TEST(extract_large_ts_has_functions_issue213) {
     enum { NFUNCS = 4000 };
@@ -3366,6 +3581,12 @@ SUITE(extraction) {
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(extract_java_jaxrs_path_composition_issue1005);
+    RUN_TEST(extract_ts_template_string_url_issue1006);
+    RUN_TEST(extract_ts_url_builder_issue1009);
+    RUN_TEST(extract_ts_url_builder_composed_issue1009);
+    RUN_TEST(extract_java_no_double_class_qn);
+    RUN_TEST(extract_go_no_filename_in_module_qn);
     RUN_TEST(extract_large_ts_has_functions_issue213);
 
     /* Per-function complexity metrics (Tier A) */
