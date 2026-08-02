@@ -2182,8 +2182,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         int vcount = 0;
         bool sq_present = false;
         bool sq_type_error =
-            run_semantic_query_core(args, store, project, limit,
-                                    (sq_present && !has_structural_filters) ? CBM_VECTOR_SEARCH_PRIMARY : CBM_VECTOR_SEARCH_SIDECAR,
+            run_semantic_query_core(args, store, project, limit, CBM_VECTOR_SEARCH_SIDECAR,
                                     &vresults, &vcount, NULL, &sq_present);
         if (!sq_type_error) {
             /* Semantic-only calls get semantic results only: the legacy
@@ -2277,9 +2276,8 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     int vcount = 0;
     bool sq_present = false;
     bool sq_type_error =
-        run_semantic_query_core(args, store, project, limit,
-                              (sq_present && !has_structural_filters) ? CBM_VECTOR_SEARCH_PRIMARY : CBM_VECTOR_SEARCH_SIDECAR,
-                              &vresults, &vcount, NULL, &sq_present);
+        run_semantic_query_core(args, store, project, limit, CBM_VECTOR_SEARCH_SIDECAR,
+                                &vresults, &vcount, NULL, &sq_present);
     if (sq_type_error) {
         free(project);
         free(label);
