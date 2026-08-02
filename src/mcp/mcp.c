@@ -5598,6 +5598,7 @@ static void expl_put_numbered(expl_buf_t *b, const char *src, int start_line) {
     }
 }
 
+/* ── explore neighbor expansion (M2-a) ────────────────────────────
  * 1-hop callees + same-file siblings, so one explore call covers the surrounding
  * area (parity with codegraph's explore) while seeds/blast-radius/hotspots stay
  * precisely attributed. Defaults ON; an explicit `expand:false` disables it. */
