@@ -80,6 +80,18 @@ static const char *itoa_log(int val) {
     return bufs[i];
 }
 
+
+/* ── Internal types ──────────────────────────────────────────────── */
+
+enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2, PROPS_BUF_LEN = 256 };
+
+typedef struct {
+    int64_t node_id;
+    cbm_minhash_t fp;
+    const char *file_path;
+    const char *ext;
+} fp_entry_t;
+
 static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
     const fp_entry_t *a = pa;
     const fp_entry_t *b = pb;
@@ -95,17 +107,6 @@ static int cmp_fp_entry_by_qn(const void *pa, const void *pb) {
     return 0;
 }
 
-
-/* ── Internal types ──────────────────────────────────────────────── */
-
-enum { FP_ENTRY_INIT_CAP = 256, FP_ENTRY_GROW = 2, PROPS_BUF_LEN = 256 };
-
-typedef struct {
-    int64_t node_id;
-    cbm_minhash_t fp;
-    const char *file_path;
-    const char *ext;
-} fp_entry_t;
 
 /* Collect all Function/Method nodes with fingerprints from graph buffer. */
 static int collect_fp_entries(cbm_gbuf_t *gbuf, fp_entry_t **out_entries) {
