@@ -3596,9 +3596,6 @@ static void execute_with_aggregate(cbm_return_clause_t *wc, binding_t *bindings,
         /* #601: grouping is O(bindings x groups) and each iteration evaluates
          * every non-aggregate expression. Abort if we blow the wall-clock
          * budget, matching execute_return_agg. */
-        if ((bi & CYPHER_DEADLINE_CHECK_MASK) == 0 && cypher_deadline_exceeded()) {
-            break;
-        }
         char key[CBM_SZ_1K] = "";
         with_agg_build_key(wc, &bindings[bi], key, sizeof(key));
         int found = with_agg_find_or_create(&aggs, &agg_cnt, &agg_cap, wc, &bindings[bi], key);
@@ -4353,11 +4350,11 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         scan_pattern_nodes(store, project, &patn->nodes[0], &extra_nodes, &extra_count);
         int rc = 0;
         if (patn->rel_count == 0) {
-            rc = cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
+            cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
         } else {
             cbm_node_t *extra_nodes = NULL;
             int extra_count = 0;
-            scan_pattern_nodes(store, project, max_rows, &patn->nodes[0], &extra_nodes,
+            scan_pattern_nodes(store, project, &patn->nodes[0], &extra_nodes,
                                &extra_count);
             if (patn->rel_count == 0) {
                 cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
