@@ -312,8 +312,6 @@ TEST(httpd_path_match_matrix) {
     PASS();
 }
 
-<<<<<<< ours
-=======
 TEST(httpd_resolves_bare_binary_path_from_path) {
 #ifdef _WIN32
     PASS();
@@ -412,7 +410,6 @@ TEST(httpd_resolves_deleted_self_to_replaced_launch_path) {
 #endif
 }
 
->>>>>>> theirs
 /* ── Transport integration (listener only) ────────────────────── */
 
 TEST(httpd_listen_ephemeral_port) {
@@ -663,13 +660,10 @@ SUITE(httpd) {
     RUN_TEST(httpd_query_param_decode);
     RUN_TEST(httpd_query_param_edge_cases);
     RUN_TEST(httpd_path_match_matrix);
-<<<<<<< ours
-=======
     RUN_TEST(httpd_resolves_bare_binary_path_from_path);
     RUN_TEST(httpd_resolves_deleted_self_to_replaced_launch_path);
     RUN_TEST(repo_info_web_base_normalizes_to_https);
     RUN_TEST(repo_info_strips_credentials_from_remote);
->>>>>>> theirs
 
     /* Transport */
     RUN_TEST(httpd_listen_ephemeral_port);

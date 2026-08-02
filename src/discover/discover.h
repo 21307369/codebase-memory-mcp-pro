@@ -39,19 +39,6 @@ const char *cbm_language_name(CBMLanguage lang);
  * On read failure, defaults to CBM_LANG_MATLAB. */
 CBMLanguage cbm_disambiguate_m(const char *path);
 
-<<<<<<< ours
-=======
-/* Disambiguate .cls files by reading first 4KB of content.
- * Returns CBM_LANG_OBJECTSCRIPT_UDL if a line starts with "Class <Uppercase>",
- * otherwise CBM_LANG_APEX. On read failure, defaults to CBM_LANG_APEX. */
-CBMLanguage cbm_disambiguate_cls(const char *path);
-
-/* Disambiguate .inc files by reading first 4KB of content.
- * Returns CBM_LANG_OBJECTSCRIPT_ROUTINE if it looks like an ObjectScript
- * include (a "ROUTINE <Uppercase>" header), otherwise CBM_LANG_BITBAKE.
- * On read failure, defaults to CBM_LANG_BITBAKE. */
-CBMLanguage cbm_disambiguate_inc(const char *path);
-
 /* Detect a supported script language from a file's shebang (#!...) first line.
  * Conservative fallback used only when filename/extension detection is unknown
  * (see detect_file_language); it never overrides extension or special-filename
@@ -66,7 +53,6 @@ CBMLanguage cbm_disambiguate_inc(const char *path);
  * shebang, an embedded NUL in the first line, or an unknown interpreter. */
 CBMLanguage cbm_language_from_shebang(const char *path);
 
->>>>>>> theirs
 /* ── Gitignore pattern matching ──────────────────────────────────── */
 
 typedef struct cbm_gitignore cbm_gitignore_t;

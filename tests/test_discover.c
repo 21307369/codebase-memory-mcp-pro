@@ -319,6 +319,7 @@ TEST(discover_count_files_bounded) {
     PASS();
 }
 
+
 /* The allocation-free bounded count must apply the same shebang fallback as
  * full discovery (issue #1199): extensionless scripts count, extensionless
  * plain text does not, and the limit boundary stays exact over that mix. */
@@ -775,8 +776,6 @@ TEST(discover_nested_gitignore_stacks_with_root) {
     PASS();
 }
 
-<<<<<<< ours
-=======
 /* A repository may have one nested .gitignore per package. Ownership is
  * cumulative across the walk, not bounded by the traversal depth, so more than
  * 64 sibling matchers must remain valid for both full discovery and the
@@ -1055,7 +1054,6 @@ TEST(shebang_oversized_first_line_unindexed) {
     PASS();
 }
 
->>>>>>> theirs
 /* ── Suite ─────────────────────────────────────────────────────── */
 
 SUITE(discover) {
@@ -1149,14 +1147,10 @@ SUITE(discover) {
 
     /* Integration tests (cross-platform) */
     RUN_TEST(discover_simple);
-<<<<<<< ours
-    RUN_TEST(discover_count_files_bounded);
-=======
     RUN_TEST(discover_wide_sibling_fanout_exceeds_initial_walk_stack);
     RUN_TEST(discover_bounded_count_is_allocation_free_and_limit_exact);
     RUN_TEST(discover_bounded_count_fails_closed_after_deadline);
     RUN_TEST(discover_bounded_count_matches_shebang_discovery);
->>>>>>> theirs
     RUN_TEST(discover_skips_git_dir);
     RUN_TEST(discover_with_gitignore);
     RUN_TEST(discover_gitignore_dir_excluded_issue234);
