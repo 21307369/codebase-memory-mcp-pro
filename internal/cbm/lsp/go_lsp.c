@@ -2793,7 +2793,6 @@ CBMTypeRegistry* cbm_go_build_cross_registry(
     }
 
     cbm_registry_finalize(reg);
-    reg->read_only = true; /* seal: shared Tier-2 registry is read-only during resolve */
     return reg;
 }
 
