@@ -2760,8 +2760,20 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path,
-                                                       qn_safe_segment(a, name), ctx->language);
+    const char *qn_base = qn_safe_segment(a, name);
+    def.qualified_name =
+        cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, qn_base, ctx->language);
+    /* A free function inside a namespace (C++/CUDA) is qualified by the namespace
+     * scope the def walk carries (enclosing_class_qn extended by
+     * is_namespace_scope_kind), so `detail::square` is proj.file.ns.detail.square
+     * instead of collapsing to the file scope where namespace-aware resolution can
+     * never see it. Class methods never reach here (they go through
+     * extract_class_methods), so a set scope is always a namespace. The out-of-line
+     * method path below overrides this for `Cls::method` definitions. */
+    if (ctx->enclosing_class_qn &&
+        (ctx->language == CBM_LANG_CPP || ctx->language == CBM_LANG_CUDA)) {
+        def.qualified_name = cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, qn_base);
+    }
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5410,6 +5422,17 @@ static bool is_template_class_node(TSNode node, CBMLanguage lang) {
     return false;
 }
 
+// A namespace contributes a QN segment so a symbol declared in `namespace ns`
+// is `proj.file.ns.sym`, not a top-level `proj.file.sym`. Without the namespace
+// in the QN, namespace-aware resolution (C++ `ns::fn` calls) can never match.
+// A namespace emits no def of its own — it only extends the enclosing scope.
+static bool is_namespace_scope_kind(CBMLanguage lang, const char *kind) {
+    if (lang == CBM_LANG_CPP || lang == CBM_LANG_CUDA) {
+        return strcmp(kind, "namespace_definition") == 0;
+    }
+    return false;
+}
+
 // Compute the enclosing class QN for a class node (for nested class context).
 static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char *saved_enclosing) {
     TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
@@ -5945,6 +5968,21 @@ static void walk_defs(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec, 
 
         if (ctx->language == CBM_LANG_RUST && strcmp(kind, "impl_item") == 0) {
             extract_rust_impl(ctx, node, spec);
+            continue;
+        }
+
+        /* A namespace extends the enclosing scope (so members are QN-qualified by
+         * it) without being a def itself. Push its children under the extended
+         * scope so each member is walked normally. Do NOT emit a def or run the
+         * class/func paths on the namespace node itself. */
+        if (is_namespace_scope_kind(ctx->language, kind)) {
+            const char *new_enclosing = compute_class_qn(ctx, node, frame.enclosing_class_qn);
+            uint32_t ns_count = ts_node_child_count(node);
+            for (int i = (int)ns_count - SKIP_CHAR; i >= 0 && top < CBM_WALK_DEFS_STACK_CAP;
+                 i--) {
+                stack[top++] = (walk_defs_frame_t){ts_node_child(node, (uint32_t)i),
+                                                   new_enclosing};
+            }
             continue;
         }
 

@@ -35,6 +35,31 @@
  * (Go, C/C++, Python, PHP). */
 #define CBM_LSP_CONFIDENCE_FLOOR 0.6f
 
+/* Recover the bare member name from a dotted/qualified name. Textual callee
+ * names use '.', '::' (C++ Ns::f) and '->' (p->run), while the LSP records
+ * dotted internal QNs (Class.method). Splitting only on '.' leaves
+ * `Math::square` and `p->run` intact, so they never match the LSP short name
+ * and the type-aware strategy is silently dropped to the textual registry.
+ * Treat '.', ':' and '>' as terminal separators so the bare method name is
+ * recovered on BOTH the QN side and the textual side. Other languages'
+ * callee names contain none of `::`/`->`, so this is a no-op for them. */
+static inline const char *cbm_lsp_bare_segment(const char *name) {
+    if (!name) {
+        return name;
+    }
+    const char *seg = name;
+    for (const char *p = name; *p; p++) {
+        /* '.' (dotted QN / Java-style member) and ':' (C++ `::`, last colon
+         * wins) are member/scope separators. '>' is only a separator when it
+         * closes the `->` arrow (preceded by '-'); a bare '>' closes a
+         * template argument list ("identity<int>") and must NOT split. */
+        if (*p == '.' || *p == ':' || (*p == '>' && p != name && p[-1] == '-')) {
+            seg = p + SKIP_ONE;
+        }
+    }
+    return seg;
+}
+
 /* Look up the highest-confidence LSP-resolved call entry whose caller QN
  * matches the textual call's enclosing function and whose callee QN
  * short-name matches the textual callee. Returns a pointer into `arr`
@@ -65,9 +90,8 @@ static inline const CBMResolvedCall *cbm_pipeline_find_lsp_resolution(
         if (strcmp(rc->caller_qn, call->enclosing_func_qn) != 0) {
             continue;
         }
-        const char *short_name = strrchr(rc->callee_qn, '.');
-        short_name = short_name ? short_name + SKIP_ONE : rc->callee_qn;
-        if (strcmp(short_name, call->callee_name) != 0) {
+        const char *short_name = cbm_lsp_bare_segment(rc->callee_qn);
+        if (strcmp(short_name, cbm_lsp_bare_segment(call->callee_name)) != 0) {
             continue;
         }
         if (!best || rc->confidence > best->confidence) {
