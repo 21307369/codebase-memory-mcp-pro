@@ -4137,7 +4137,23 @@ static void c_process_function(CLSPContext *ctx, TSNode func_node) {
 
     // Build enclosing function QN
     const char *func_qn = c_build_qn(ctx, func_name);
-    if (ctx->module_qn && !strchr(func_qn, '.')) {
+    // For a method defined INLINE inside its class body, func_name is a bare
+    // identifier ("compute") and enclosing_class_qn was inherited from
+    // c_process_class (saved_class_qn == enclosing_class_qn). The textual
+    // extractor and the registry qualify the method as module.Class.method, so
+    // building func_qn as module.method here (no class) made the LSP-resolved
+    // call's caller_qn disagree with the textual call's enclosing_func_qn and
+    // cbm_pipeline_find_lsp_resolution never joined them — every in-method call
+    // (e.g. lsp_implicit_this) silently lost its type-aware strategy. Prepend
+    // the enclosing class, mirroring the Go receiver-QN fix. Out-of-line
+    // definitions (Widget::compute) already carry the class in func_name (a
+    // qualified_identifier), so c_build_qn produces module.Class.method and the
+    // enclosing_class_qn was set HERE (saved_class_qn != enclosing_class_qn);
+    // skip those, and skip names that already contain the class scope.
+    if (ctx->enclosing_class_qn && saved_class_qn == ctx->enclosing_class_qn &&
+        !strchr(func_qn, '.')) {
+        func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->enclosing_class_qn, func_qn);
+    } else if (ctx->module_qn && !strchr(func_qn, '.')) {
         func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, func_qn);
     }
     ctx->enclosing_func_qn = func_qn;
