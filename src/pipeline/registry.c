@@ -469,7 +469,7 @@ static bool cbm_python_is_weak_short_name_strategy(const char *strategy) {
         return false;
     }
     return strcmp(strategy, "suffix_match") == 0 || strcmp(strategy, "unique_name") == 0 ||
-           strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
+           strcmp(strategy, "fuzzy") == 0;
 }
 
 bool cbm_python_suppress_weak_generic_call(bool is_python, bool is_method, const char *callee_name,
