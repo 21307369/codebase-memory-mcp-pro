@@ -36,6 +36,90 @@ enum {
 
 #include <stdio.h>
 #include <string.h>
+bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
+
+/* True for characters that may appear in a ":name" route parameter. */
+static inline bool is_route_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Canonicalize route-path parameter placeholders to a single "{}" token so that
+ * client call sites and server handlers rendezvous on the same Route QN
+ * regardless of framework syntax. Each parameter token collapses to "{}":
+ *
+ *   :name    Express / React-Router / Rails / typical JS API clients
+ *   {name}   Axum / Spring / OpenAPI / ASP.NET
+ *   <name>   Flask / Rocket (incl. typed "<int:id>")
+ *   ${...}   JS template interpolation captured into the path
+ *
+ * Parameter names are intentionally discarded so the same logical endpoint
+ * matches across services that name the path variable differently. Static path
+ * text is copied verbatim; the result never exceeds the input length. */
+const char *cbm_route_canon_path(const char *in, char *out, size_t out_sz) {
+    if (out == NULL || out_sz == 0) {
+        return out;
+    }
+    if (in == NULL) {
+        out[0] = '\0';
+        return out;
+    }
+    const size_t last = out_sz - 1;
+    size_t oi = 0;
+    size_t i = 0;
+    while (in[i] != '\0' && oi < last) {
+        char c = in[i];
+        bool at_seg_start = (oi == 0) || (out[oi - 1] == '/');
+        bool is_param = false;
+
+        if (c == ':' && at_seg_start && is_route_ident_char(in[i + 1])) {
+            i++;
+            while (in[i] != '\0' && is_route_ident_char(in[i])) {
+                i++;
+            }
+            is_param = true;
+        } else if (c == '{') {
+            i++;
+            while (in[i] != '\0' && in[i] != '}' && in[i] != '/') {
+                i++;
+            }
+            if (in[i] == '}') {
+                i++;
+            }
+            is_param = true;
+        } else if (c == '<') {
+            i++;
+            while (in[i] != '\0' && in[i] != '>' && in[i] != '/') {
+                i++;
+            }
+            if (in[i] == '>') {
+                i++;
+            }
+            is_param = true;
+        } else if (c == '$' && in[i + 1] == '{') {
+            i += 2;
+            while (in[i] != '\0' && in[i] != '}' && in[i] != '/') {
+                i++;
+            }
+            if (in[i] == '}') {
+                i++;
+            }
+            is_param = true;
+        }
+
+        if (is_param) {
+            if (oi + 2 > last) {
+                break;
+            }
+            out[oi++] = '{';
+            out[oi++] = '}';
+            continue;
+        }
+        out[oi++] = c;
+        i++;
+    }
+    out[oi] = '\0';
+    return out;
+}
 
 /* Extract a JSON string value by key from properties.
  * Returns pointer into buf (caller provides buffer). NULL if not found. */
@@ -84,6 +168,14 @@ static void route_edge_visitor(const cbm_gbuf_edge_t *edge, void *userdata) {
     if (!url || !url[0]) {
         return;
     }
+    char callee_buf[CBM_SZ_256];
+    const char *callee =
+        json_extract(edge->properties_json, "callee", callee_buf, sizeof(callee_buf));
+    if (strcmp(edge->type, "HTTP_CALLS") == 0 &&
+        !cbm_service_pattern_is_http_route_literal(url, callee)) {
+        return;
+    }
+
 
     /* Extract method or broker */
     char method_buf[CBM_SZ_16];
@@ -95,8 +187,10 @@ static void route_edge_visitor(const cbm_gbuf_edge_t *edge, void *userdata) {
 
     /* Build Route QN */
     char route_qn[CBM_ROUTE_QN_SIZE];
-    if (strcmp(edge->type, "HTTP_CALLS") == 0) {
-        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method ? method : "ANY", url);
+     if (strcmp(edge->type, "HTTP_CALLS") == 0) {
+        char cpath[CBM_SZ_256];
+        snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method ? method : "ANY",
+                 cbm_route_canon_path(url, cpath, sizeof(cpath)));
     } else {
         snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", broker ? broker : "async", url);
     }
@@ -351,7 +445,9 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
     extract_json_prop(func->properties_json, "route_method", method, sizeof(method));
 
     char route_qn[CBM_ROUTE_QN_SIZE];
-    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method, path);
+    char cpath[CBM_SZ_256];
+    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method,
+             cbm_route_canon_path(path, cpath, sizeof(cpath)));
     const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
 
     char rprops[CBM_SZ_256];
@@ -566,6 +662,15 @@ static void finish_data_flow_props(char *props, size_t propsz, size_t pos,
         props[pos + SKIP_ONE] = '\0';
     }
 }
+static bool http_call_edge_has_valid_route(const cbm_gbuf_edge_t *edge) {
+    char url_buf[CBM_SZ_512];
+    const char *url = json_extract(edge->properties_json, "url_path", url_buf, sizeof(url_buf));
+    char callee_buf[CBM_SZ_256];
+    const char *callee =
+        json_extract(edge->properties_json, "callee", callee_buf, sizeof(callee_buf));
+    return cbm_service_pattern_is_http_route_literal(url, callee);
+}
+
 
 typedef struct {
     int64_t source_id;
@@ -654,8 +759,11 @@ static int collect_caller_edges(cbm_gbuf_t *gb, int64_t route_id, caller_edge_re
     const cbm_gbuf_edge_t **http_edges = NULL;
     int http_count = 0;
     cbm_gbuf_find_edges_by_target_type(gb, route_id, "HTTP_CALLS", &http_edges, &http_count);
-    for (int i = 0; i < http_count && n < max_out; i++) {
-        out[n].source_id = http_edges[i]->source_id;
+     for (int i = 0; i < http_count && n < max_out; i++) {
+        if (!http_call_edge_has_valid_route(http_edges[i])) {
+            continue;
+        }
+         out[n].source_id = http_edges[i]->source_id;
         out[n].props = http_edges[i]->properties_json;
         out[n].edge_type = "HTTP_CALLS";
         n++;

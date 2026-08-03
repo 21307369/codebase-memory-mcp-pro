@@ -235,13 +235,26 @@ static char *extract_callee_from_fields(CBMArena *a, TSNode node, const char *so
             strcmp(fk, "attribute") == 0 || strcmp(fk, "member_expression") == 0 ||
             strcmp(fk, "field_expression") == 0 || strcmp(fk, "dot") == 0 ||
             strcmp(fk, "function") == 0 || strcmp(fk, "dotted_identifier") == 0 ||
-            strcmp(fk, "member_access_expression") == 0 || strcmp(fk, "scoped_identifier") == 0 ||
-            strcmp(fk, "qualified_identifier") == 0 ||
-            /* ReScript: call_expression `function` field is a value_identifier
-             * (or value_identifier_path for module-qualified calls). */
-            strcmp(fk, "value_identifier") == 0 || strcmp(fk, "value_identifier_path") == 0) {
-            return cbm_node_text(a, func_node, source);
-        }
+             strcmp(fk, "member_access_expression") == 0 || strcmp(fk, "scoped_identifier") == 0 ||
+             strcmp(fk, "qualified_identifier") == 0 ||
+             /* ReScript: call_expression `function` field is a value_identifier
+              * (or value_identifier_path for module-qualified calls). */
+             strcmp(fk, "value_identifier") == 0 || strcmp(fk, "value_identifier_path") == 0) {
+            char *text = cbm_node_text(a, func_node, source);
+            /* C++: normalize :: to . so callee names match the registry format.
+             * The registry uses . as the namespace separator, but C++ source uses ::.
+             * Without this, namespace-qualified calls like detail::square() don't resolve. */
+            if (text && strstr(text, "::")) {
+                for (char *p = text; *p; p++) {
+                    if (p[0] == ':' && p[1] == ':') {
+                        p[0] = '.';
+                        // Shift the rest of the string left by one
+                        memmove(p + 1, p + 2, strlen(p + 2) + 1);
+                    }
+                }
+            }
+            return text;
+         }
         // R member call: module$fn() — function node is an extract_operator
         // with lhs (object) and rhs (method). Emit "module.fn" so it resolves
         // like other member calls (#219). Previously dropped → no CALLS edge.
@@ -1193,15 +1206,40 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
             call.loop_depth = state->loop_depth;     // enclosing loop nesting at this call
             call.branch_depth = state->branch_depth; // enclosing branch nesting at this call
             call.start_line = (int)ts_node_start_point(node).row + TS_LINE_OFFSET;
-            /* Python attribute calls (prior_cp.get(...)): flag as method so weak
-             * short-name resolution can be suppressed (G2 / WP-B C2), mirroring
-             * the TS/JS receiver-aware guard above. Bare calls stay false. */
+            /* Perl: flag arrow/method calls ($obj->m / Class->m) as methods. */
+            if (ctx->language == CBM_LANG_PERL &&
+                strcmp(ts_node_type(node), "method_call_expression") == 0) {
+                call.is_method = true;
+            }
+            /* Python attribute calls: flag as method EXCEPT for self/cls/super receivers. */
             if (ctx->language == CBM_LANG_PYTHON &&
                 strcmp(ts_node_type(node), "call") == 0) {
                 TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
                 if (!ts_node_is_null(fn) &&
                     (strcmp(ts_node_type(fn), "attribute") == 0)) {
-                    call.is_method = true;
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    if (!ts_node_is_null(obj)) {
+                        char *obj_text = cbm_node_text(ctx->arena, obj, ctx->source);
+                        if (obj_text && strcmp(obj_text, "self") != 0 &&
+                            strcmp(obj_text, "cls") != 0 && strcmp(obj_text, "super") != 0) {
+                            call.is_method = true;
+                        }
+                    }
+                }
+            }
+            /* TS/JS/TSX: flag member calls with non-this/super receivers as methods. */
+            if ((ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
+                 ctx->language == CBM_LANG_TSX) &&
+                strcmp(ts_node_type(node), "call_expression") == 0) {
+                TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
+                if (!ts_node_is_null(fn) && strcmp(ts_node_type(fn), "member_expression") == 0) {
+                    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+                    if (!ts_node_is_null(obj)) {
+                        const char *ok = ts_node_type(obj);
+                        if (strcmp(ok, "this") != 0 && strcmp(ok, "super") != 0) {
+                            call.is_method = true;
+                        }
+                    }
                 }
             }
 

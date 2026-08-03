@@ -130,6 +130,7 @@ typedef struct {
 cbm_detected_agents_t cbm_detect_agents(const char *home_dir);
 
 bool cbm_hook_augment_parse_bash_pattern_for_testing(const char *cmd, char *out, size_t out_sz);
+void cbm_set_auto_answer_for_test(int value);
 /* ── Agent MCP config upsert (per agent) ──────────────────────── */
 
 /* Codex CLI: upsert MCP entry in ~/.codex/config.toml. Returns 0 on success. */

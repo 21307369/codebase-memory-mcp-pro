@@ -298,6 +298,14 @@ static int init_schema(cbm_store_t *s) {
         "  properties TEXT DEFAULT '{}',"
         "  UNIQUE(project, qualified_name)"
         ");"
+        /* local_name_gen (#768): IMPORTS edges carry one imported symbol's
+         * local_name each, so uniqueness must discriminate on it — two named
+         * imports from the same specifier are distinct edges. Non-IMPORTS
+         * edges get '' (NOT NULL: NULLs never conflict in a UNIQUE index,
+         * which would break their dedup entirely). Mirrors the graph-buffer
+         * dedup key (make_edge_key) and the raw dump writer's DDL + hand-
+         * built sqlite_autoindex_edges_1 (internal/cbm/sqlite_writer.c) —
+         * keep all three in sync. */
         "CREATE TABLE IF NOT EXISTS edges ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
@@ -306,7 +314,9 @@ static int init_schema(cbm_store_t *s) {
         "  type TEXT NOT NULL,"
         "  properties TEXT DEFAULT '{}',"
         "  url_path_gen TEXT GENERATED ALWAYS AS (json_extract(properties,'$.url_path')),"
-        "  UNIQUE(source_id, target_id, type)"
+        "  local_name_gen TEXT GENERATED ALWAYS AS (CASE WHEN type='IMPORTS'"
+        "    THEN coalesce(json_extract(properties,'$.local_name'),'') ELSE '' END),"
+        "  UNIQUE(source_id, target_id, type, local_name_gen)"
         ");"
         "CREATE TABLE IF NOT EXISTS project_summaries ("
         "  project TEXT PRIMARY KEY,"
@@ -321,11 +331,6 @@ static int init_schema(cbm_store_t *s) {
         return rc;
     }
 
-    /* FTS5 contentless virtual table for BM25 full-text search.
-     * Contentless (content='') means FTS5 stores only the inverted index,
-     * not a copy of the source text — required for camelCase tokenization
-     * because we feed it `cbm_camel_split(name)` at insert time but want
-     * queries to match against the split tokens, not the original. */
     /* Schema-compat probe (#768): DBs created before the local_name_gen
      * discriminator still enforce UNIQUE(source_id,target_id,type) and lack
      * the column — the widened upsert in cbm_store_insert_edge can neither
@@ -344,6 +349,7 @@ static int init_schema(cbm_store_t *s) {
         }
         sqlite3_finalize(probe);
     }
+
 
     /* FTS5 contentless virtual table for BM25 full-text search (see NODES_FTS_DDL).
      * Created here for fresh databases and read paths; cbm_store_fts_rebuild drops
@@ -1444,11 +1450,14 @@ int cbm_store_upsert_node_batch(cbm_store_t *s, const cbm_node_t *nodes, int cou
 /* ── Edge CRUD ──────────────────────────────────────────────────── */
 
 int64_t cbm_store_insert_edge(cbm_store_t *s, const cbm_edge_t *e) {
+    /* Conflict target includes local_name_gen (#768) so IMPORTS edges with
+     * different local_name coexist while re-inserting the same import still
+     * upserts. Must match the table's UNIQUE constraint in init_schema. */
     sqlite3_stmt *stmt =
         prepare_cached(s, &s->stmt_insert_edge,
                        "INSERT INTO edges (project, source_id, target_id, type, properties) "
                        "VALUES (?1, ?2, ?3, ?4, ?5) "
-                       "ON CONFLICT(source_id, target_id, type) DO UPDATE SET "
+                       "ON CONFLICT(source_id, target_id, type, local_name_gen) DO UPDATE SET "
                        "properties = json_patch(properties, ?5) "
                        "RETURNING id;");
     if (!stmt) {

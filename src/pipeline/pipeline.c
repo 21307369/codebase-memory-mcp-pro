@@ -258,6 +258,7 @@ void cbm_pipeline_free(cbm_pipeline_t *p) {
     p->excluded_dirs = NULL;
     p->excluded_count = 0;
     free(p->branch_qn);
+    free(p->saved_adr);
     cbm_git_context_free(&p->git_ctx);
     /* gbuf, store, registry freed during/after run */
     /* Defensively free userconfig in case run() was never called or panicked */
@@ -921,7 +922,7 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     {
         cbm_store_t *adr_store = cbm_store_open_path(db_path);
         if (adr_store) {
-            cbm_adr_t existing;
+            cbm_adr_t existing = {0};
             if (cbm_store_adr_get(adr_store, p->project_name, &existing) == CBM_STORE_OK) {
                 if (existing.content) {
                     free(p->saved_adr);

@@ -122,5 +122,7 @@ TEST(infrascan_http_calls_join_matching_handler_route) {
 }
 
 SUITE(infrascan) {
-    /* All infrascan tests live in test_pipeline.c's pipeline suite */
+    RUN_TEST(infrascan_http_route_literal_guard_rejects_filesystem_paths);
+    RUN_TEST(infrascan_route_nodes_skip_bad_http_url_paths);
+    RUN_TEST(infrascan_http_calls_join_matching_handler_route);
 }

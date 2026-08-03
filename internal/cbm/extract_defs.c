@@ -1061,10 +1061,14 @@ static bool is_comment_node(const char *kind) {
 }
 
 // Extract comment text, truncating to MAX_COMMENT_LEN.
+// #1017: snap the cut point back to a complete UTF-8 codepoint boundary.
 static char *extract_comment_text(CBMArena *a, TSNode node, const char *source) {
     char *text = cbm_node_text(a, node, source);
     if (text && strlen(text) > MAX_COMMENT_LEN) {
-        text[MAX_COMMENT_LEN] = '\0';
+        size_t cut = MAX_COMMENT_LEN;
+        while (cut > 0 && ((unsigned char)text[cut] & 0xC0) == 0x80)
+            cut--;
+        text[cut] = '\0';
     }
     return text;
 }
@@ -1301,35 +1305,91 @@ static bool try_route_from_annotation(CBMArena *a, TSNode annotation, const char
     return true;
 }
 
-/* Scan the annotation nodes nested in a JVM/C# `modifiers`/`attribute_list`
- * wrapper (and direct children) for a route-mapping annotation. Java/Kotlin
- * Spring annotations (@GetMapping, @RequestMapping, ...) live here rather than
- * as prev-siblings, so the prev-sibling decorator walk never sees them. */
-static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
-                                           const CBMLangSpec *spec, const char **out_path,
-                                           const char **out_method) {
-    TSNode modifiers = find_jvm_modifiers(func_node, spec->language);
+/* Scan ALL annotation nodes nested in a JVM/C# `modifiers`/`attribute_list`
+ * wrapper (and direct children), collecting route information from the whole
+ * set instead of stopping at the first mapping annotation. Java/Kotlin Spring
+ * annotations (@GetMapping, @RequestMapping, ...) live here rather than as
+ * prev-siblings, so the prev-sibling decorator walk never sees them.
+ *
+ * JAX-RS splits the route across two annotations: the verb comes from a bare
+ * @GET/@POST/... and the path from a sibling @Path("..."). Returning on the
+ * first mapping annotation therefore dropped every method-level @Path
+ * (the @GET matched first, defaulted the path to "/", and @Path was never
+ * read), and class-level @Path prefixes were never recognized at all. */
+static void scan_route_annotations(CBMArena *a, TSNode owner, const char *source,
+                                   const CBMLangSpec *spec, const char **out_map_path,
+                                   const char **out_method, const char **out_jax_path) {
+    *out_map_path = NULL;
+    *out_method = NULL;
+    *out_jax_path = NULL;
+
+    TSNode wrappers[2];
+    int wn = 0;
+    TSNode modifiers = find_jvm_modifiers(owner, spec->language);
     if (!ts_node_is_null(modifiers)) {
-        uint32_t mc = ts_node_child_count(modifiers);
-        for (uint32_t mi = 0; mi < mc; mi++) {
-            TSNode mchild = ts_node_child(modifiers, mi);
-            if (cbm_kind_in_set(mchild, spec->decorator_node_types) &&
-                try_route_from_annotation(a, mchild, source, out_path, out_method)) {
-                return true;
-            }
-        }
+        wrappers[wn++] = modifiers;
     }
     /* Direct-child annotations (some grammars attach the annotation as a child
      * of the method node rather than under `modifiers`). */
-    uint32_t cc = ts_node_child_count(func_node);
-    for (uint32_t ci = 0; ci < cc; ci++) {
-        TSNode child = ts_node_child(func_node, ci);
-        if (cbm_kind_in_set(child, spec->decorator_node_types) &&
-            try_route_from_annotation(a, child, source, out_path, out_method)) {
-            return true;
+    wrappers[wn++] = owner;
+
+    for (int w = 0; w < wn; w++) {
+        uint32_t cc = ts_node_child_count(wrappers[w]);
+        for (uint32_t ci = 0; ci < cc; ci++) {
+            TSNode child = ts_node_child(wrappers[w], ci);
+            if (!cbm_kind_in_set(child, spec->decorator_node_types)) {
+                continue;
+            }
+            TSNode name_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
+            if (ts_node_is_null(name_node)) {
+                continue;
+            }
+            char *name = cbm_node_text(a, name_node, source);
+            if (!name) {
+                continue;
+            }
+            if (!*out_jax_path && strcmp(name, "Path") == 0) {
+                TSNode args = ts_node_child_by_field_name(child, TS_FIELD("arguments"));
+                if (ts_node_is_null(args)) {
+                    args = find_decorator_args(child);
+                }
+                if (!ts_node_is_null(args)) {
+                    *out_jax_path = extract_route_path_from_args(a, args, source);
+                }
+                continue;
+            }
+            if (!*out_method) {
+                const char *method = annotation_route_method(name);
+                if (method) {
+                    *out_method = method;
+                    TSNode args = ts_node_child_by_field_name(child, TS_FIELD("arguments"));
+                    if (ts_node_is_null(args)) {
+                        args = find_decorator_args(child);
+                    }
+                    if (!ts_node_is_null(args)) {
+                        *out_map_path = extract_route_path_from_args(a, args, source);
+                    }
+                }
+            }
         }
     }
-    return false;
+}
+
+static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
+                                           const CBMLangSpec *spec, const char **out_path,
+                                           const char **out_method) {
+    const char *map_path = NULL;
+    const char *method = NULL;
+    const char *jax_path = NULL;
+    scan_route_annotations(a, func_node, source, spec, &map_path, &method, &jax_path);
+    /* Method-level routes still require a verb/mapping annotation; a lone
+     * @Path (JAX-RS sub-resource locator) is not an endpoint by itself. */
+    if (!method) {
+        return false;
+    }
+    *out_method = method;
+    *out_path = map_path ? map_path : (jax_path ? jax_path : "/");
+    return true;
 }
 
 static void extract_route_from_decorators(CBMArena *a, TSNode func_node, const char *source,
@@ -2700,7 +2760,8 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
     memset(&def, 0, sizeof(def));
 
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, qn_safe_segment(a, name));
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path,
+                                                       qn_safe_segment(a, name), ctx->language);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -2749,7 +2810,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
          * is computed the same way (cbm_fqn_compute on the type name). */
         char *recv_type = go_receiver_type_name(a, recv, ctx->source);
         if (recv_type && recv_type[0]) {
-            def.parent_class = cbm_fqn_compute(a, ctx->project, ctx->rel_path, recv_type);
+            def.parent_class = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, recv_type, ctx->language);
         }
     }
 
@@ -2762,7 +2823,7 @@ static void extract_func_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec 
         strcmp(ts_node_type(node), "function_definition") == 0) {
         char *scope_name = cpp_out_of_line_parent_class(a, node, ctx->source);
         if (scope_name && scope_name[0]) {
-            const char *class_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, scope_name);
+            const char *class_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, scope_name, ctx->language);
             def.qualified_name = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
             def.label = "Method";
             def.parent_class = class_qn;
@@ -2912,7 +2973,7 @@ static void push_simple_class_def(CBMExtractCtx *ctx, TSNode node, char *name, c
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = label;
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -3467,7 +3528,7 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     if (ctx->enclosing_class_qn) {
         class_qn = cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
     } else {
-        class_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+        class_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     }
     const char *label = class_label_for_kind(kind);
 
@@ -3799,9 +3860,48 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
     TSNode null_node = {0};
     return null_node;
 }
+static const char *join_route_paths(CBMArena *a, const char *prefix, const char *path) {
+    if (!path || !path[0]) {
+        return prefix;
+    }
+    if (!prefix || !prefix[0] || strcmp(prefix, "/") == 0) {
+        return path;
+    }
+    if (strcmp(path, "/") == 0) {
+        return prefix;
+    }
+    size_t plen = strlen(prefix);
+    bool prefix_slash = prefix[plen - 1] == '/';
+    bool path_slash = path[0] == '/';
+    if (prefix_slash && path_slash) {
+        return cbm_arena_sprintf(a, "%s%s", prefix, path + 1);
+    }
+    if (!prefix_slash && !path_slash) {
+        return cbm_arena_sprintf(a, "%s/%s", prefix, path);
+    }
+    return cbm_arena_sprintf(a, "%s%s", prefix, path);
+}
+
+static const char *spring_class_route_prefix(CBMArena *a, TSNode class_node, const char *source,
+                                             const CBMLangSpec *spec) {
+    const char *map_path = NULL;
+    const char *method = NULL;
+    const char *jax_path = NULL;
+    scan_route_annotations(a, class_node, source, spec, &map_path, &method, &jax_path);
+    if (map_path) {
+        return map_path;
+    }
+    if (jax_path) {
+        return jax_path;
+    }
+    if (method) {
+        return "/";
+    }
+    return NULL;
+}
 
 // Push a single method definition
-static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_qn,
+static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node, const char *class_qn,
                             const CBMLangSpec *spec, TSNode name_node) {
     CBMArena *a = ctx->arena;
 
@@ -3850,6 +3950,14 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, const char *class_
 
     def.decorators = extract_decorators(a, child, ctx->source, ctx->language, spec);
     extract_route_from_decorators(a, child, ctx->source, spec, &def.route_path, &def.route_method);
+    
+    if (def.route_path && !ts_node_is_null(class_node)) {
+        const char *class_prefix = spring_class_route_prefix(a, class_node, ctx->source, spec);
+        if (class_prefix) {
+            def.route_path = join_route_paths(a, class_prefix, def.route_path);
+        }
+    }
+    
     def.docstring = extract_docstring(a, child, ctx->source, ctx->language);
 
     if (spec->branching_node_types && spec->branching_node_types[0]) {
@@ -3878,7 +3986,7 @@ static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, cons
         if (cbm_kind_in_set(inner, spec->function_node_types)) {
             TSNode nm = resolve_method_name(inner, ctx->language);
             if (!ts_node_is_null(nm)) {
-                push_method_def(ctx, inner, class_qn, spec, nm);
+                push_method_def(ctx, inner, impl_node, class_qn, spec, nm);
             }
         }
     }
@@ -3929,7 +4037,7 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
                 if (ts_node_is_null(nn)) {
                     continue;
                 }
-                push_method_def(ctx, dchild, class_qn, spec, nn);
+                push_method_def(ctx, dchild, class_node, class_qn, spec, nn);
             }
             continue;
         }
@@ -3963,7 +4071,7 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
             continue;
         }
 
-        push_method_def(ctx, method_node, class_qn, spec, name_node);
+        push_method_def(ctx, method_node, class_node, class_qn, spec, name_node);
     }
 }
 
@@ -4011,7 +4119,7 @@ static void extract_rust_impl(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         }
     }
 
-    const char *type_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, type_name);
+    const char *type_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, type_name, ctx->language);
 
     // Extract methods inside impl body
     TSNode body = ts_node_child_by_field_name(node, TS_FIELD("body"));
@@ -4107,7 +4215,7 @@ static void extract_elixir_func_def(CBMExtractCtx *ctx, TSNode node, const char 
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -4135,7 +4243,7 @@ static TSNode emit_elixir_module_class(CBMExtractCtx *ctx, TSNode cur) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Class";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(cur).row + TS_LINE_OFFSET;
@@ -4198,7 +4306,7 @@ static void push_var_def(CBMExtractCtx *ctx, const char *name, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Variable";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5408,7 +5516,7 @@ static void extract_cfml_function_tag(CBMExtractCtx *ctx, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5442,7 +5550,7 @@ static void extract_gotemplate_define(CBMExtractCtx *ctx, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = raw;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, raw);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, raw, ctx->language);
     def.label = "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5497,7 +5605,7 @@ static void extract_janet_def(CBMExtractCtx *ctx, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = is_class ? "Class" : "Function";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5532,7 +5640,7 @@ static void extract_c_macro_def(CBMExtractCtx *ctx, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = "Macro";
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5621,7 +5729,7 @@ static void extract_lisp_def(CBMExtractCtx *ctx, TSNode node) {
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = name;
-    def.qualified_name = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+    def.qualified_name = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     def.label = lisp_label;
     def.file_path = ctx->rel_path;
     def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
@@ -5681,7 +5789,7 @@ static void recover_kotlin_error_classes(CBMExtractCtx *ctx, TSNode err_node) {
         if (ctx->enclosing_class_qn) {
             class_qn = cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name);
         } else {
-            class_qn = cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+            class_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
         }
 
         /* Collect bases from any `delegation_specifier` siblings that follow the

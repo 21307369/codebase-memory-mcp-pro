@@ -228,6 +228,8 @@ static bool is_string_node(const char *kind) {
             strcmp(kind, "string_content") == 0 ||
             strcmp(kind, "interpreted_string_literal") == 0 ||
             strcmp(kind, "raw_string_literal") == 0 || strcmp(kind, "string_value") == 0 ||
+            /* JS/TS template literal */
+            strcmp(kind, "template_string") == 0 ||
             /* YAML string types */
             strcmp(kind, "double_quote_scalar") == 0 || strcmp(kind, "single_quote_scalar") == 0);
 }
@@ -238,20 +240,33 @@ static void handle_string_refs(CBMExtractCtx *ctx, TSNode node, const WalkState 
         return;
     }
 
-    /* Extract string content */
-    char *text = cbm_node_text(ctx->arena, node, ctx->source);
-    if (!text || !text[0]) {
-        return;
-    }
+    const char *content = NULL;
+    int len = 0;
+    char *text = NULL;
 
-    /* Strip quotes if present */
-    int len = (int)strlen(text);
-    const char *content = text;
-    if (len >= CBM_QUOTE_PAIR && (text[0] == '"' || text[0] == '\'')) {
-        content = text + SKIP_ONE;
-        len -= PAIR_LEN;
-        if (len <= 0) {
+    /* Template strings need special flattening via cbm_template_string_text */
+    if (strcmp(kind, "template_string") == 0) {
+        content = cbm_template_string_text(ctx->arena, node, ctx->source);
+        if (!content) {
             return;
+        }
+        len = (int)strlen(content);
+    } else {
+        /* Extract string content */
+        text = cbm_node_text(ctx->arena, node, ctx->source);
+        if (!text || !text[0]) {
+            return;
+        }
+
+        /* Strip quotes if present */
+        len = (int)strlen(text);
+        content = text;
+        if (len >= 2 && (text[0] == '"' || text[0] == '\'')) {
+            content = text + 1;
+            len -= 2;
+            if (len <= 0) {
+                return;
+            }
         }
     }
 

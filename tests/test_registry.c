@@ -1045,8 +1045,8 @@ SUITE(registry) {
     RUN_TEST(perl_builtin_set_rejects_project_subs);
     RUN_TEST(perl_suppress_drops_weak_builtin_and_method_matches);
     RUN_TEST(perl_suppress_keeps_high_confidence_and_genuine_calls);
-    RUN_TEST(tsjs_suppress_drops_weak_method_matches);
-    RUN_TEST(tsjs_suppress_keeps_high_confidence_and_non_methods);
+    RUN_TEST(dynamic_suppress_drops_weak_method_matches);
+    RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(python_suppress_drops_weak_member_and_generic_bare);
     RUN_TEST(python_suppress_keeps_strong_strategies_and_non_generic_bare);
 }

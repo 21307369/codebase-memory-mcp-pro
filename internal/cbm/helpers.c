@@ -152,7 +152,8 @@ bool cbm_label_is_type_like(const char *label) {
     }
     return strcmp(label, "Class") == 0 || strcmp(label, "Struct") == 0 ||
            strcmp(label, "Interface") == 0 || strcmp(label, "Enum") == 0 ||
-           strcmp(label, "Type") == 0 || strcmp(label, "Trait") == 0;
+           strcmp(label, "Type") == 0 || strcmp(label, "Trait") == 0 ||
+           strcmp(label, "Actor") == 0;
 }
 
 bool cbm_is_keyword(const char *name, CBMLanguage lang) {
@@ -1097,6 +1098,50 @@ char *cbm_fqn_compute(CBMArena *a, const char *project, const char *rel_path, co
 
 char *cbm_fqn_module(CBMArena *a, const char *project, const char *rel_path) {
     return cbm_fqn_compute(a, project, rel_path, NULL);
+}
+
+// True when a language derives its module from the CONTAINING DIRECTORY (Java
+// package, Go package) rather than baking the filename stem into the module QN.
+static bool cbm_lang_module_is_dir(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVA || lang == CBM_LANG_GO;
+}
+
+char *cbm_fqn_module_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                 CBMLanguage lang) {
+    if (!cbm_lang_module_is_dir(lang)) {
+        return cbm_fqn_module(a, project, rel_path);
+    }
+    if (!rel_path) {
+        rel_path = "";
+    }
+    // Module is the CONTAINING DIRECTORY: strip the basename (last '/' segment).
+    const char *last_slash = strrchr(rel_path, '/');
+    if (!last_slash) {
+        return cbm_fqn_folder(a, project, "");
+    }
+    size_t dir_len = (size_t)(last_slash - rel_path);
+    char *dir = (char *)cbm_arena_alloc(a, dir_len + SKIP_ONE);
+    if (!dir) {
+        return NULL;
+    }
+    memcpy(dir, rel_path, dir_len);
+    dir[dir_len] = '\0';
+    return cbm_fqn_folder(a, project, dir);
+}
+
+char *cbm_fqn_compute_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                  const char *name, CBMLanguage lang) {
+    if (!cbm_lang_module_is_dir(lang)) {
+        return cbm_fqn_compute(a, project, rel_path, name);
+    }
+    char *module = cbm_fqn_module_source_lang(a, project, rel_path, lang);
+    if (!module) {
+        return NULL;
+    }
+    if (!name || !name[0]) {
+        return module;
+    }
+    return cbm_arena_sprintf(a, "%s.%s", module, name);
 }
 
 char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir) {

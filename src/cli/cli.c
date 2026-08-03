@@ -2653,6 +2653,11 @@ int cbm_cmd_config(int argc, char **argv) {
 /* Global auto-answer mode: 0=interactive, 1=always yes, -1=always no */
 static int g_auto_answer = 0;
 
+/* Test hook: drive confirm/cancel prompts without a TTY. */
+void cbm_set_auto_answer_for_test(int value) {
+    g_auto_answer = value;
+}
+
 static void parse_auto_answer(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0) {

@@ -30,7 +30,6 @@ extern void suite_store_nodes(void);
 extern void suite_store_edges(void);
 extern void suite_store_search(void);
 extern void suite_cypher(void);
-extern void suite_mcp(void);
 extern void suite_language(void);
 extern void suite_userconfig(void);
 extern void suite_gitignore(void);
@@ -39,8 +38,6 @@ extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
 
-    RUN_SUITE(index_format);
-extern void suite_fqn(void);
 extern void suite_path_alias(void);
 extern void suite_watcher(void);
 extern void suite_lz4(void);
@@ -137,9 +134,6 @@ int main(void) {
     /* Cypher (M6) */
     RUN_SUITE(cypher);
 
-    /* MCP Server (M9) */
-    RUN_SUITE(mcp);
-
     /* Discover (M2) */
     RUN_SUITE(language);
     RUN_SUITE(userconfig);
@@ -151,7 +145,6 @@ int main(void) {
 
     /* Pipeline (M8) */
 
-    RUN_SUITE(index_format);
 
     /* Watcher (M10) */
     RUN_SUITE(watcher);

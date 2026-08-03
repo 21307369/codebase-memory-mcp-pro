@@ -1199,7 +1199,7 @@ CBMLanguage cbm_disambiguate_m(const char *path) {
 /* Case-insensitive prefix match (portable — no strncasecmp dependency). */
 static bool starts_with_ci(const char *s, const char *prefix) {
     for (; *prefix; s++, prefix++) {
-        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
+        if (!*s || tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
             return false;
         }
     }

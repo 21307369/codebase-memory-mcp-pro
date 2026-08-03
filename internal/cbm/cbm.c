@@ -568,7 +568,7 @@ CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage 
     TSNode root = ts_tree_root_node(tree);
 
     // Compute module QN
-    result->module_qn = cbm_fqn_module(a, project, rel_path);
+    result->module_qn = cbm_fqn_module_source_lang(a, project, rel_path, language);
     result->is_test_file = cbm_is_test_file(rel_path, language);
 
     // Build extraction context

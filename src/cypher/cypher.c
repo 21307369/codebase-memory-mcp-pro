@@ -754,6 +754,14 @@ static void expr_free(cbm_expr_t *e) {
             safe_str_free(&cur->cond.property);
             safe_str_free(&cur->cond.op);
             safe_str_free(&cur->cond.value);
+            safe_str_free(&cur->cond.coalesce_default);
+            safe_str_free(&cur->cond.func);
+            for (int i = 0; i < cur->cond.arg_count; i++) {
+                safe_str_free(&cur->cond.args[i].variable);
+                safe_str_free(&cur->cond.args[i].property);
+                safe_str_free(&cur->cond.args[i].literal);
+            }
+            free(cur->cond.args);
             for (int i = 0; i < cur->cond.in_value_count; i++) {
                 safe_str_free(&cur->cond.in_values[i]);
             }
@@ -1013,6 +1021,78 @@ static cbm_expr_t *parse_condition_expr(parser_t *p) {
     /* EXISTS { pattern } predicate (anchored single-hop existence). */
     if (check(p, TOK_EXISTS)) {
         return parse_exists_predicate(p, negated);
+    }
+
+    /* coalesce(var.prop, literal) (#874): null-safe property access with default */
+    if (check(p, TOK_IDENT) && strcasecmp(peek(p)->text, "coalesce") == 0) {
+        advance(p); /* consume "coalesce" */
+        if (!match(p, TOK_LPAREN)) {
+            snprintf(p->error, sizeof(p->error), "expected '(' after coalesce");
+            return NULL;
+        }
+        const cbm_token_t *var = expect(p, TOK_IDENT);
+        if (!var) {
+            return NULL;
+        }
+        if (!match(p, TOK_DOT)) {
+            snprintf(p->error, sizeof(p->error), "expected '.' in coalesce(var.prop, ...)");
+            return NULL;
+        }
+        const cbm_token_t *prop = expect(p, TOK_IDENT);
+        if (!prop) {
+            return NULL;
+        }
+        if (!match(p, TOK_COMMA)) {
+            snprintf(p->error, sizeof(p->error), "expected ',' in coalesce(var.prop, default)");
+            return NULL;
+        }
+        const cbm_token_t *def = expect(p, TOK_NUMBER);
+        if (!def) {
+            def = expect(p, TOK_STRING);
+        }
+        if (!def) {
+            snprintf(p->error, sizeof(p->error), "expected literal default in coalesce");
+            return NULL;
+        }
+        if (!match(p, TOK_RPAREN)) {
+            snprintf(p->error, sizeof(p->error), "expected ')' after coalesce");
+            return NULL;
+        }
+        
+        cbm_condition_t c = {0};
+        c.negated = negated;
+        c.variable = heap_strdup(var->text);
+        c.property = heap_strdup(prop->text);
+        c.coalesce_default = heap_strdup(def->text);
+        
+        /* Now parse the operator and value */
+        c.op = parse_comparison_op(p);
+        if (!c.op) {
+            snprintf(p->error, sizeof(p->error), "expected operator after coalesce");
+            safe_str_free(&c.variable);
+            safe_str_free(&c.property);
+            safe_str_free(&c.coalesce_default);
+            return NULL;
+        }
+        
+        if (check(p, TOK_STRING) || check(p, TOK_NUMBER)) {
+            c.value = heap_strdup(advance(p)->text);
+        } else if (check(p, TOK_TRUE)) {
+            advance(p);
+            c.value = heap_strdup("true");
+        } else if (check(p, TOK_FALSE)) {
+            advance(p);
+            c.value = heap_strdup("false");
+        } else {
+            snprintf(p->error, sizeof(p->error), "expected value at pos %d", peek(p)->pos);
+            safe_str_free(&c.variable);
+            safe_str_free(&c.property);
+            safe_str_free(&c.coalesce_default);
+            safe_str_free(&c.op);
+            return NULL;
+        }
+        
+        return expr_leaf(c);
     }
 
     const cbm_token_t *var = expect(p, TOK_IDENT);
@@ -2429,6 +2509,11 @@ static bool eval_condition(const cbm_condition_t *c, binding_t *b) {
     }
 
     const char *actual = resolve_condition_value(c, b);
+    /* coalesce(var.prop, literal) (#874): a missing/empty property value
+     * falls back to the literal default before the operator runs. */
+    if (c->coalesce_default && (!actual || actual[0] == '\0')) {
+        actual = c->coalesce_default;
+    }
     if (!actual) {
         return true;
     }
@@ -2823,8 +2908,16 @@ static void scan_pattern_nodes(cbm_store_t *store, const char *project, cbm_node
 static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count, bool inbound,
                           const cbm_node_pattern_t *target_node, binding_t *b, const char *to_var,
                           const char *rel_var, binding_t *new_bindings, int *new_count, int max_new,
-                          int *match_count) {
-    for (int ei = 0; ei < edge_count && *new_count < max_new; ei++) {
+                          int *match_count, const char *src_var) {
+    /* Repeated variable unification (#797): when to_var == src_var, the target
+     * must be the same node as the source (self-loop check). */
+    bool same_var = (src_var && to_var && strcmp(src_var, to_var) == 0);
+    cbm_node_t *src_node = same_var ? binding_get(b, src_var) : NULL;
+    int64_t src_id = src_node ? src_node->id : 0;
+    
+    /* The budget caps MATERIALISATION, not detection: `match_count` must stay
+     * truthful even after `new_count` hits `max_new`. */
+    for (int ei = 0; ei < edge_count; ei++) {
         int64_t tid = inbound ? edges[ei].source_id : edges[ei].target_id;
         cbm_node_t found = {0};
         if (cbm_store_find_node_by_id(store, tid, &found) != CBM_STORE_OK) {
@@ -2838,15 +2931,22 @@ static void process_edges(cbm_store_t *store, cbm_edge_t *edges, int edge_count,
             node_fields_free(&found);
             continue;
         }
-        binding_t nb = {0};
-        binding_copy(&nb, b);
-        binding_set(&nb, to_var, &found);
-        if (rel_var) {
-            binding_set_edge(&nb, rel_var, &edges[ei]);
+        /* Repeated variable: target must equal source */
+        if (same_var && found.id != src_id) {
+            node_fields_free(&found);
+            continue;
+        }
+        (*match_count)++;
+        if (*new_count < max_new) {
+            binding_t nb = {0};
+            binding_copy(&nb, b);
+            binding_set(&nb, to_var, &found);
+            if (rel_var) {
+                binding_set_edge(&nb, rel_var, &edges[ei]);
+            }
+            new_bindings[(*new_count)++] = nb;
         }
         node_fields_free(&found);
-        new_bindings[(*new_count)++] = nb;
-        (*match_count)++;
     }
 }
 
@@ -2856,6 +2956,9 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                               const char *to_var, binding_t *new_bindings, int *new_count,
                               int max_new, int *match_count) {
     int max_depth = rel->max_hops > 0 ? rel->max_hops : CYP_MAX_DEPTH;
+    if (max_depth > CYP_MAX_DEPTH) {
+        max_depth = CYP_MAX_DEPTH;
+    }
     cbm_traverse_result_t tr = {0};
     const char *dir = rel->direction ? rel->direction : "outbound";
     cbm_store_bfs(store, src->id, dir, rel->types, rel->type_count, max_depth, CBM_PERCENT, &tr);
@@ -2881,6 +2984,7 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
         binding_t nb = {0};
         binding_copy(&nb, b);
         binding_set(&nb, to_var, &hop->node);
+        if (*new_count >= max_new) { (*match_count)++; continue; }
         new_bindings[(*new_count)++] = nb;
         (*match_count)++;
     }
@@ -2890,7 +2994,8 @@ static void expand_var_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
 /* Expand fixed-length (1-hop) relationship edges */
 static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                                 cbm_node_pattern_t *target_node, binding_t *b, cbm_node_t *src,
-                                const char *to_var, binding_t *new_bindings, int *new_count,
+                                const char *to_var, const char *src_var,
+                                binding_t *new_bindings, int *new_count,
                                 int max_new, int *match_count) {
     bool is_inbound = rel->direction && strcmp(rel->direction, "inbound") == 0;
     bool is_any = rel->direction && strcmp(rel->direction, "any") == 0;
@@ -2908,7 +3013,7 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                                                     &edge_count);
             }
             process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var,
-                          new_bindings, new_count, max_new, match_count);
+                          new_bindings, new_count, max_new, match_count, src_var);
             cbm_store_free_edges(edges, edge_count);
         }
         if (is_any) {
@@ -2918,7 +3023,7 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
                 cbm_store_find_edges_by_target_type(store, src->id, rel->types[ti], &edges,
                                                     &edge_count);
                 process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                              new_bindings, new_count, max_new, match_count);
+                              new_bindings, new_count, max_new, match_count, src_var);
                 cbm_store_free_edges(edges, edge_count);
             }
         }
@@ -2931,14 +3036,14 @@ static void expand_fixed_length(cbm_store_t *store, cbm_rel_pattern_t *rel,
             cbm_store_find_edges_by_source(store, src->id, &edges, &edge_count);
         }
         process_edges(store, edges, edge_count, is_inbound, target_node, b, to_var, rel_var,
-                      new_bindings, new_count, max_new, match_count);
+                      new_bindings, new_count, max_new, match_count, src_var);
         cbm_store_free_edges(edges, edge_count);
         if (is_any) {
             edges = NULL;
             edge_count = 0;
             cbm_store_find_edges_by_target(store, src->id, &edges, &edge_count);
             process_edges(store, edges, edge_count, true, target_node, b, to_var, rel_var,
-                          new_bindings, new_count, max_new, match_count);
+                          new_bindings, new_count, max_new, match_count, src_var);
             cbm_store_free_edges(edges, edge_count);
         }
     }
@@ -2955,7 +3060,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
         bool is_variable_length = (rel->min_hops != SKIP_ONE || rel->max_hops != SKIP_ONE);
 
         binding_t *new_bindings =
-            malloc(((*bind_cap * CYP_GROWTH_10) + SKIP_ONE) * sizeof(binding_t));
+            malloc(((size_t)*bind_cap * CYP_GROWTH_10 + SKIP_ONE) * sizeof(binding_t));
         int new_count = 0;
 
         for (int bi = 0; bi < *bind_count; bi++) {
@@ -2972,7 +3077,7 @@ static void expand_pattern_rels(cbm_store_t *store, cbm_pattern_t *pat, binding_
                 expand_var_length(store, rel, target_node, b, src, to_var, new_bindings, &new_count,
                                   max_new, &match_count);
             } else {
-                expand_fixed_length(store, rel, target_node, b, src, to_var, new_bindings,
+                expand_fixed_length(store, rel, target_node, b, src, to_var, *var_name, new_bindings,
                                     &new_count, max_new, &match_count);
             }
 
@@ -4138,7 +4243,7 @@ static void execute_default_projection(cbm_pattern_t *pat0, binding_t *bindings,
 /* Cross-join node-only pattern into existing bindings */
 static void cross_join_nodes(binding_t **bindings, int *bind_count, cbm_node_t *extra_nodes,
                              int extra_count, const char *nvar, bool opt) {
-    binding_t *new_bindings = malloc(((*bind_count * extra_count) + SKIP_ONE) * sizeof(binding_t));
+    binding_t *new_bindings = malloc(((size_t)*bind_count * (size_t)extra_count + SKIP_ONE) * sizeof(binding_t));
     int new_count = 0;
     for (int bi = 0; bi < *bind_count; bi++) {
         for (int ni = 0; ni < extra_count; ni++) {
@@ -4166,7 +4271,7 @@ static void cross_join_with_rels(cbm_store_t *store, cbm_pattern_t *patn, bindin
                                  int *bind_count, cbm_node_t *extra_nodes, int extra_count,
                                  const char *nvar, bool opt) {
     binding_t *new_bindings =
-        malloc(((*bind_count * extra_count * CYP_GROWTH_10) + SKIP_ONE) * sizeof(binding_t));
+        malloc(((size_t)*bind_count * (size_t)extra_count * CYP_GROWTH_10 + SKIP_ONE) * sizeof(binding_t));
     int new_count = 0;
     for (int bi = 0; bi < *bind_count; bi++) {
         for (int ni = 0; ni < extra_count; ni++) {
@@ -4351,18 +4456,10 @@ static void expand_additional_patterns(cbm_store_t *store, cbm_query_t *q, const
         if (patn->rel_count == 0) {
             cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
         } else {
-            cbm_node_t *extra_nodes = NULL;
-            int extra_count = 0;
-            scan_pattern_nodes(store, project, &patn->nodes[0], &extra_nodes,
-                               &extra_count);
-            if (patn->rel_count == 0) {
-                cross_join_nodes(bindings, bind_count, extra_nodes, extra_count, nvar, opt);
-            } else {
-                cross_join_with_rels(store, patn, bindings, bind_count, extra_nodes, extra_count,
-                                     nvar, opt);
-            }
-            cbm_store_free_nodes(extra_nodes, extra_count);
+            cross_join_with_rels(store, patn, bindings, bind_count, extra_nodes, extra_count,
+                                 nvar, opt);
         }
+        cbm_store_free_nodes(extra_nodes, extra_count);
     }
 }
 

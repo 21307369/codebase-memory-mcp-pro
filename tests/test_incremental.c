@@ -140,6 +140,10 @@ static int count_in_response(const char *resp, const char *key) {
     p = strstr(resp, pattern);
     if (p)
         return atoi(p + strlen(pattern));
+    snprintf(pattern, sizeof(pattern), "%s: ", key);
+    p = strstr(resp, pattern);
+    if (p)
+        return atoi(p + strlen(pattern));
     return -1;
 }
 
@@ -901,6 +905,10 @@ static int resp_has_key(const char *resp, const char *key) {
     if (strstr(resp, pattern) != NULL)
         return 1;
     snprintf(pattern, sizeof(pattern), "\\\"%s\\\"", key);
+    if (strstr(resp, pattern) != NULL)
+        return 1;
+    /* TOON scalar form (`key: value`), the search_graph default output. */
+    snprintf(pattern, sizeof(pattern), "%s: ", key);
     return strstr(resp, pattern) != NULL;
 }
 

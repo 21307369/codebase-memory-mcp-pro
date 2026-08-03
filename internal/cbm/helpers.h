@@ -93,4 +93,11 @@ char *cbm_fqn_module(CBMArena *a, const char *project, const char *rel_path);
 // Folder QN: project.dir_parts
 char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir);
 
+// Language-aware module QN: Java/Go derive the module from the containing
+// directory instead of the file stem (#de-double).
+char *cbm_fqn_module_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                 CBMLanguage lang);
+char *cbm_fqn_compute_source_lang(CBMArena *a, const char *project, const char *rel_path,
+                                  const char *name, CBMLanguage lang);
+
 #endif // CBM_HELPERS_H
