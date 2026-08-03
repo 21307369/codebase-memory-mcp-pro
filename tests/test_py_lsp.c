@@ -556,6 +556,63 @@ TEST(pylsp_crossfile_method_dispatch) {
     PASS();
 }
 
+/* Graph-quality guard for the Python seal fix (per-file field overlay). In the
+ * FUSED path the shared Tier-2 registry is read_only, so `self.b = Bar()` can no
+ * longer be recorded by mutating the shared registry; it is recorded in the per-file
+ * overlay instead. This test proves the overlay preserves same-file attribute-chain
+ * resolution: self.b.work() must still resolve to Bar.work. It RED-fails under a
+ * plain read_only *gate* (option A: the field is dropped, self.b is untyped, the
+ * work() call goes unresolved) and GREENs with the overlay. It ALSO asserts the
+ * shared registry entry stays unmutated (Foo.field_names == NULL) — the seal half. */
+TEST(pylsp_fused_self_attr_chain_via_overlay) {
+    CBMArena arena;
+    cbm_arena_init(&arena);
+
+    /* Sealed shared registry: class Bar with method work(), class Foo. */
+    CBMLSPDef defs[3];
+    memset(defs, 0, sizeof(defs));
+    defs[0].qualified_name = "test.mod.Bar";
+    defs[0].short_name = "Bar";
+    defs[0].label = "Class";
+    defs[0].def_module_qn = "test.mod";
+    defs[0].lang = CBM_LANG_PYTHON;
+    defs[1].qualified_name = "test.mod.Bar.work";
+    defs[1].short_name = "work";
+    defs[1].label = "Method";
+    defs[1].receiver_type = "test.mod.Bar";
+    defs[1].def_module_qn = "test.mod";
+    defs[1].lang = CBM_LANG_PYTHON;
+    defs[2].qualified_name = "test.mod.Foo";
+    defs[2].short_name = "Foo";
+    defs[2].label = "Class";
+    defs[2].def_module_qn = "test.mod";
+    defs[2].lang = CBM_LANG_PYTHON;
+
+    CBMTypeRegistry *reg = cbm_py_build_cross_registry(&arena, defs, 3);
+    ASSERT_NOT_NULL(reg);
+    ASSERT_TRUE(reg->read_only);
+
+    /* Foo.__init__ records self.b = Bar(); Foo.run dispatches self.b.work(). */
+    const char *src = "class Foo:\n"
+                      "    def __init__(self):\n"
+                      "        self.b = Bar()\n"
+                      "    def run(self):\n"
+                      "        return self.b.work()\n";
+    CBMResolvedCallArray out = {0};
+    cbm_run_py_lsp_cross_with_registry(&arena, src, (int)strlen(src), "test.mod", reg, NULL, NULL, 0,
+                                       NULL, &out);
+
+    /* Overlay preserves the attribute-chain edge. */
+    ASSERT_GTE(find_resolved_arr(&out, "run", "work"), 0);
+    /* Seal preserved: the shared registry entry was NOT mutated. */
+    const CBMRegisteredType *foo = cbm_registry_lookup_type(reg, "test.mod.Foo");
+    ASSERT_NOT_NULL(foo);
+    ASSERT_TRUE(foo->field_names == NULL);
+
+    cbm_arena_destroy(&arena);
+    PASS();
+}
+
 /* Issue #228: a class/static method invoked directly on a CROSS-FILE imported
  * class name — ActionRecordX.build_from_text(...) — produced no CALLS edge, so
  * the method showed in/out degree 0 and was flagged as dead code. Distinct from
@@ -1279,6 +1336,7 @@ SUITE(py_lsp) {
     RUN_TEST(pylsp_pep695_generic_class);
     /* Phase 9 — cross-file + batch */
     RUN_TEST(pylsp_crossfile_method_dispatch);
+    RUN_TEST(pylsp_fused_self_attr_chain_via_overlay);
     RUN_TEST(pylsp_crossfile_classmethod_on_class_issue228);
     RUN_TEST(pylsp_crossfile_inheritance);
     RUN_TEST(pylsp_batch_two_files);

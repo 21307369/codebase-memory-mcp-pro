@@ -388,6 +388,50 @@ static const CBMRegisteredFunc *py_lookup_attribute(PyLSPContext *ctx, const cha
     return py_lookup_attribute_depth(ctx, type_qn, member_name, 0);
 }
 
+/* Per-file field overlay: look up a (class_qn, field_name) recorded during resolve
+ * against the sealed shared registry. Linear scan — the overlay only holds fields
+ * discovered in THIS file's own classes, so it is small. */
+static const CBMType *py_overlay_lookup_field(const PyLSPContext *ctx, const char *class_qn,
+                                              const char *field_name) {
+    for (int i = 0; i < ctx->field_overlay_count; i++) {
+        if (strcmp(ctx->field_overlay[i].class_qn, class_qn) == 0 &&
+            strcmp(ctx->field_overlay[i].field_name, field_name) == 0)
+            return ctx->field_overlay[i].field_type;
+    }
+    return NULL;
+}
+
+/* Record a (class_qn, field_name) -> field_type in the per-file overlay. Overwrites
+ * an existing entry (mirrors the direct-mutation overwrite semantics). Arena-backed;
+ * grows by copy. class_qn/field_name are arena-dup'd so the entry never borrows a
+ * transient node-text buffer. */
+static void py_overlay_register_field(PyLSPContext *ctx, const char *class_qn,
+                                      const char *field_name, const CBMType *field_type) {
+    for (int i = 0; i < ctx->field_overlay_count; i++) {
+        if (strcmp(ctx->field_overlay[i].class_qn, class_qn) == 0 &&
+            strcmp(ctx->field_overlay[i].field_name, field_name) == 0) {
+            ctx->field_overlay[i].field_type = field_type;
+            return;
+        }
+    }
+    if (ctx->field_overlay_count >= ctx->field_overlay_cap) {
+        int new_cap = ctx->field_overlay_cap == 0 ? 16 : ctx->field_overlay_cap * 2;
+        void *na = cbm_arena_alloc(ctx->arena, (size_t)new_cap * sizeof(*ctx->field_overlay));
+        if (!na)
+            return; /* OOM: drop this field (resolution degrades, never corrupts) */
+        if (ctx->field_overlay && ctx->field_overlay_count > 0)
+            memcpy(na, ctx->field_overlay,
+                   (size_t)ctx->field_overlay_count * sizeof(*ctx->field_overlay));
+        ctx->field_overlay = na;
+        ctx->field_overlay_cap = new_cap;
+    }
+    ctx->field_overlay[ctx->field_overlay_count].class_qn = cbm_arena_strdup(ctx->arena, class_qn);
+    ctx->field_overlay[ctx->field_overlay_count].field_name =
+        cbm_arena_strdup(ctx->arena, field_name);
+    ctx->field_overlay[ctx->field_overlay_count].field_type = field_type;
+    ctx->field_overlay_count++;
+}
+
 /* Look up a field on a registered type. Walks alias / embedded chain
  * with the same depth cap as method lookup. Returns the field's type
  * or NULL if no match. */
@@ -407,6 +451,15 @@ static const CBMType *py_lookup_field_depth(PyLSPContext *ctx, const char *type_
                 return rt->field_types[i];
             }
         }
+    }
+    /* Per-file overlay: `self.x = ...` fields discovered during resolve against the
+     * sealed shared registry live here (not on rt). Checked at the same point the
+     * direct field scan would have found them in the mutable path — preserving the
+     * derived-shadows-base precedence before recursing into alias/base classes. */
+    {
+        const CBMType *ov = py_overlay_lookup_field(ctx, type_qn, field_name);
+        if (ov)
+            return ov;
     }
     if (rt->alias_of) {
         const CBMType *a = py_lookup_field_depth(ctx, rt->alias_of, field_name, depth + 1);
@@ -437,6 +490,19 @@ static void py_register_instance_field(PyLSPContext *ctx, const char *class_qn,
                                        const char *field_name, const CBMType *field_type) {
     if (!ctx || !ctx->registry || !class_qn || !field_name || !field_type)
         return;
+
+    /* Shared Tier-2 registry is finalized + sealed (read_only) and read concurrently
+     * by all resolve workers. Writing its type entries directly below would bypass the
+     * add_* seal, race the other workers, and leave the shared entry pointing into
+     * this file's resolve arena (freed when the file completes). Route the discovery
+     * to the per-file overlay instead; py_lookup_field consults it alongside the
+     * shared base, so same-file `self.x`/PEP-526 resolution is preserved with zero
+     * shared mutation. Mutable per-file registries (read_only == false) keep the
+     * byte-identical direct write below. */
+    if (ctx->registry->read_only) {
+        py_overlay_register_field(ctx, class_qn, field_name, field_type);
+        return;
+    }
 
     // Find the type entry. cbm_registry_lookup_type returns a const pointer;
     // we need a mutable pointer into the registry's array.
