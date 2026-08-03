@@ -30,6 +30,14 @@ enum { PC_RING = 4, PC_RING_MASK = 3, PC_SIG_SCAN = 15, PC_REGEX_GRP = 2 };
 #include <stdlib.h>
 #include <string.h>
 
+/* True for languages whose module QN derives from the CONTAINING DIRECTORY
+ * (Java/Go package). MUST match cbm_lang_module_is_dir() (internal/cbm/helpers.c)
+ * so same-module callee resolution keys against the directory-based def-node
+ * QNs in the registry. */
+static bool pc_module_is_dir(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVA || lang == CBM_LANG_GO;
+}
+
 /* Read entire file into heap-allocated buffer. Caller must free(). */
 static char *read_file(const char *path, int *out_len) {
     FILE *f = fopen(path, "rb");
@@ -504,8 +512,10 @@ int cbm_pipeline_pass_calls(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *file
         int imp_count = 0;
         build_import_map(ctx, rel, result, &imp_keys, &imp_vals, &imp_count);
 
-        /* Compute module QN for same-module resolution */
-        char *module_qn = cbm_pipeline_fqn_module(ctx->project_name, rel);
+        /* Compute module QN for same-module resolution (directory-based for
+         * Java/Go so it matches their def-node QNs in the registry). */
+        char *module_qn = cbm_pipeline_fqn_module_dir(ctx->project_name, rel,
+                                                      pc_module_is_dir(files[i].language));
 
         /* Resolve each call */
         for (int c = 0; c < result->calls.count; c++) {
@@ -651,7 +661,8 @@ void cbm_pipeline_pass_fastapi_depends(cbm_pipeline_ctx_t *ctx, const cbm_file_i
             continue;
         }
 
-        char *module_qn = cbm_pipeline_fqn_module(ctx->project_name, files[i].rel_path);
+        char *module_qn = cbm_pipeline_fqn_module_dir(ctx->project_name, files[i].rel_path,
+                                                      pc_module_is_dir(files[i].language));
 
         /* Build import map for alias resolution */
         const char **imp_keys = NULL;

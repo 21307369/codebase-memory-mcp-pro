@@ -1211,17 +1211,40 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                 strcmp(ts_node_type(node), "method_call_expression") == 0) {
                 call.is_method = true;
             }
-            /* Python attribute calls: flag as method EXCEPT for self/cls/super receivers. */
+            /* Python attribute calls: flag as method EXCEPT for self/cls/super receivers
+             * and imported-module receivers (which are import-resolvable, not methods). */
             if (ctx->language == CBM_LANG_PYTHON &&
                 strcmp(ts_node_type(node), "call") == 0) {
                 TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
                 if (!ts_node_is_null(fn) &&
-                    (strcmp(ts_node_type(fn), "attribute") == 0)) {
+                    strcmp(ts_node_type(fn), "attribute") == 0) {
                     TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
                     if (!ts_node_is_null(obj)) {
-                        char *obj_text = cbm_node_text(ctx->arena, obj, ctx->source);
-                        if (obj_text && strcmp(obj_text, "self") != 0 &&
-                            strcmp(obj_text, "cls") != 0 && strcmp(obj_text, "super") != 0) {
+                        bool exempt = false;
+                        const char *ok = ts_node_type(obj);
+                        if (strcmp(ok, "identifier") == 0) {
+                            char *txt = cbm_node_text(ctx->arena, obj, ctx->source);
+                            if (txt && (strcmp(txt, "self") == 0 || strcmp(txt, "cls") == 0)) {
+                                exempt = true;
+                            } else if (txt) {
+                                for (int j = 0; j < ctx->result->imports.count; j++) {
+                                    if (strcmp(txt, ctx->result->imports.items[j].local_name) == 0) {
+                                        exempt = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if (strcmp(ok, "call") == 0) {
+                            TSNode sfn = ts_node_child_by_field_name(obj, TS_FIELD("function"));
+                            if (!ts_node_is_null(sfn) &&
+                                strcmp(ts_node_type(sfn), "identifier") == 0) {
+                                char *ftxt = cbm_node_text(ctx->arena, sfn, ctx->source);
+                                if (ftxt && strcmp(ftxt, "super") == 0) {
+                                    exempt = true;
+                                }
+                            }
+                        }
+                        if (!exempt) {
                             call.is_method = true;
                         }
                     }

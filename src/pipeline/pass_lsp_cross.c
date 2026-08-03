@@ -52,6 +52,15 @@ static const char *itoa_buf(int val) {
 
 /* ── Local helpers ─────────────────────────────────────────────── */
 
+/* True for languages whose module QN is derived from the CONTAINING DIRECTORY
+ * (Java package, Go package) rather than the filename stem. MUST match the
+ * extraction-side cbm_lang_module_is_dir() in internal/cbm/helpers.c so the
+ * cross-file LSP caller_qn agrees with the def-node QN (the lsp_resolve join
+ * keys on exact equality). */
+static bool pxc_module_is_dir(CBMLanguage lang) {
+    return lang == CBM_LANG_JAVA || lang == CBM_LANG_GO;
+}
+
 /* Slurp a file into a malloc'd, NUL-terminated buffer. Mirrors the
  * read_file helper in pass_calls.c / pass_parallel.c (kept local so the
  * pipeline doesn't grow a public read-file API just for this pass). */
@@ -176,7 +185,8 @@ CBMLSPDef *cbm_pxc_collect_all_defs(CBMFileResult **cache, const cbm_file_info_t
         if (!cache[fi])
             continue;
         if (!def_modules[fi]) {
-            def_modules[fi] = cbm_pipeline_fqn_module(project_name, files[fi].rel_path);
+            def_modules[fi] = cbm_pipeline_fqn_module_dir(project_name, files[fi].rel_path,
+                                                          pxc_module_is_dir(files[fi].language));
         }
         for (int di = 0; di < cache[fi]->defs.count; di++) {
             if (pxc_build_lsp_def(&cache[fi]->arena, &cache[fi]->defs.items[di], def_modules[fi],
@@ -470,7 +480,8 @@ int cbm_pipeline_pass_lsp_cross(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *
         }
 
         if (!def_modules[i]) {
-            def_modules[i] = cbm_pipeline_fqn_module(ctx->project_name, files[i].rel_path);
+            def_modules[i] = cbm_pipeline_fqn_module_dir(ctx->project_name, files[i].rel_path,
+                                                         pxc_module_is_dir(files[i].language));
         }
 
         const char **imp_keys = NULL;

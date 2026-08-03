@@ -126,6 +126,38 @@ char *cbm_pipeline_fqn_module(const char *project, const char *rel_path) {
     return cbm_pipeline_fqn_compute(project, rel_path, NULL);
 }
 
+char *cbm_pipeline_fqn_module_dir(const char *project, const char *rel_path, bool module_is_dir) {
+    if (!module_is_dir) {
+        /* Filename-stem module (default for all but Java/Go). */
+        return cbm_pipeline_fqn_module(project, rel_path);
+    }
+    /* Directory-module languages (Java package, Go package): the module is the
+     * CONTAINING DIRECTORY — strip the basename so a sibling file in the same
+     * dir shares the module QN. This MUST agree with the extraction-side
+     * cbm_fqn_module_source_lang() (internal/cbm/helpers.c) so the cross-file
+     * LSP caller_qn matches the def-node QN. */
+    const char *src = rel_path ? rel_path : "";
+    /* Strip the last path segment using either separator (the extraction side
+     * normalizes too); look for the rightmost '/' or '\\'. */
+    const char *last_fwd = strrchr(src, '/');
+    const char *last_bwd = strrchr(src, '\\');
+    const char *last_sep = last_fwd > last_bwd ? last_fwd : last_bwd;
+    if (!last_sep) {
+        /* Root file: empty directory → module is just the project. */
+        return cbm_pipeline_fqn_folder(project, "");
+    }
+    size_t dir_len = (size_t)(last_sep - src);
+    char *dir = (char *)malloc(dir_len + 1); /* +1 for NUL */
+    if (!dir) {
+        return NULL;
+    }
+    memcpy(dir, src, dir_len);
+    dir[dir_len] = '\0';
+    char *res = cbm_pipeline_fqn_folder(project, dir);
+    free(dir);
+    return res;
+}
+
 enum {
     FQN_PATH_BUF = 1024,
     FQN_SEP_LEN = 1, /* one byte for the '/' separator */

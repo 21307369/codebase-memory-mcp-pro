@@ -5425,7 +5425,10 @@ static const char *compute_class_qn(CBMExtractCtx *ctx, TSNode node, const char 
             if (saved_enclosing) {
                 return cbm_arena_sprintf(ctx->arena, "%s.%s", saved_enclosing, cname);
             }
-            return cbm_fqn_compute(ctx->arena, ctx->project, ctx->rel_path, cname);
+            /* Top-level: language-aware module so Java/Go don't double the
+             * filename stem (matches extract_class_def above). */
+            return cbm_fqn_compute_source_lang(ctx->arena, ctx->project, ctx->rel_path, cname,
+                                               ctx->language);
         }
     }
     return saved_enclosing;
