@@ -1643,10 +1643,7 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
         emit_trpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_CONFIG) {
         emit_config_edge(gbuf, source, target, call, res, arg);
-    } else {
-        if (suppress_plain_calls) {
-            return;
-        }
+    } else if (!suppress_plain_calls) {
         emit_normal_calls_edge(gbuf, source, target, call, res);
     }
 
@@ -1907,6 +1904,20 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                 emit_service_edge(ws->local_edge_buf, source_node, source_node, call, &fake_res,
                                   module_qn, rc->registry, rc->main_gbuf, imp_keys, imp_vals,
                                   imp_count, drop_plain_call);
+            } else if (cbm_service_pattern_is_global_fetch(call->callee_name)) {
+                /* Native `fetch()` (#856): only the global API once resolution
+                 * has failed to find a local/imported `fetch`. Call the low-level
+                 * emitter directly — emit_service_edge re-derives its own kind
+                 * from res->qualified_name via cbm_service_pattern_match, which
+                 * "fetch" deliberately never matches (mirrors pass_calls.c). */
+                const char *u = call->first_string_arg;
+                if (u && u[0] != '\0' && (u[0] == '/' || strstr(u, "://") != NULL)) {
+                    cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
+                                                 .confidence = PP_HALF_CONF,
+                                                 .strategy = "service_pattern"};
+                    emit_http_async_service_edge(ws->local_edge_buf, source_node, call, &fake_res,
+                                                 CBM_SVC_HTTP, u);
+                }
             }
             continue;
         }

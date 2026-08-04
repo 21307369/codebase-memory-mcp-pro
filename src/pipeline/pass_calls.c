@@ -393,6 +393,23 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call,
     cbm_resolution_t res = cbm_registry_resolve(ctx->registry, call->callee_name, module_qn,
                                                 imp_keys, imp_vals, imp_count);
     if (!res.qualified_name || res.qualified_name[0] == '\0') {
+        /* Native `fetch()` (#856) belongs in this empty-resolution fallback,
+         * not in the substring tables above: it only counts as the global API
+         * once resolution has already failed to find a local/imported `fetch`
+         * definition. The parallel path has the equivalent empty-resolution
+         * fallback in resolve_file_calls. */
+        if (cbm_service_pattern_is_global_fetch(call->callee_name)) {
+            const char *u = call->first_string_arg;
+            bool has_url = u && u[0] != '\0' && (u[0] == '/' || strstr(u, "://") != NULL);
+            if (has_url) {
+                cbm_resolution_t fake_res = {.qualified_name = call->callee_name,
+                                             .confidence = 0.5,
+                                             .strategy = "global_fetch"};
+                emit_http_async_edge(ctx, call, source_node, NULL, &fake_res, CBM_SVC_HTTP,
+                                     false);
+                return 1;
+            }
+        }
         return 0;
     }
 
