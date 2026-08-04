@@ -1020,6 +1020,15 @@ bool cbm_is_module_level(TSNode node, CBMLanguage lang) {
 static size_t strip_ext_len(const char *s, size_t len) {
     for (size_t i = len; i > 0; i--) {
         if (s[i - SKIP_ONE] == '.') {
+            /* A dot at the very start of a filename segment (index 0, or right
+             * after a '/') is a DOTFILE marker (".env", ".gitignore"), NOT an
+             * extension separator. Stripping there leaves an empty stem whose
+             * module QN collides with the parent directory/project root. Keep
+             * the whole name as the stem; the leading dot is dropped later in
+             * append_path_segments. */
+            if (i - SKIP_ONE == 0 || s[i - SKIP_ONE - SKIP_ONE] == '/') {
+                return len;
+            }
             return i - SKIP_ONE;
         }
         if (s[i - SKIP_ONE] == '/') {
@@ -1055,9 +1064,22 @@ static char *append_path_segments(char *out, const char *rel_path, size_t plen, 
         if (part_len > 0) {
             bool is_last = (part_end == end_ptr);
             if (!should_skip_fqn_part(start, part_len, is_last, has_name)) {
-                *out++ = '.';
-                memcpy(out, start, part_len);
-                out += part_len;
+                /* Drop a leading '.' from a dotfile / hidden-dir segment
+                 * (".env" -> "env", ".github" -> "github"). Otherwise the QN
+                 * separator '.' plus the segment's own leading '.' produce a
+                 * malformed "proj..env" double-dot, and a root dotfile's empty
+                 * stem collides with the project QN. */
+                const char *seg = start;
+                size_t seg_len = part_len;
+                if (seg[0] == '.') {
+                    seg++;
+                    seg_len--;
+                }
+                if (seg_len > 0) {
+                    *out++ = '.';
+                    memcpy(out, seg, seg_len);
+                    out += seg_len;
+                }
             }
         }
         start = part_end + SKIP_ONE;
