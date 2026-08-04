@@ -10483,6 +10483,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
             cbm_tree_scalar_str(&sb, "merge_base", merge_base);
         }
         cbm_tree_scalar_str(&sb, "direction", direction);
+        cbm_tree_scalar_int(&sb, "depth", depth);
         if (is_error) {
             char hint_buf[CBM_SZ_256];
             snprintf(hint_buf, sizeof(hint_buf),
@@ -10542,6 +10543,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_strcpy(doc, root_obj, "merge_base", merge_base);
         }
         yyjson_mut_obj_add_strcpy(doc, root_obj, "direction", direction);
+        yyjson_mut_obj_add_int(doc, root_obj, "depth", depth);
         yyjson_mut_val *cf = yyjson_mut_arr(doc);
         for (int i = 0; i < file_count; i++) {
             yyjson_mut_arr_add_strcpy(doc, cf, files[i]);
