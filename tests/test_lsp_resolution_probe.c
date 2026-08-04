@@ -874,11 +874,27 @@ TEST(lrp_python_s6_inherited_method) {
          "from .base import Base\n\n\nclass Child(Base):\n"
          "    def extra(self):\n        return 'extra'\n\n\n"
          "def run(c):\n    return c.describe()\n"}};
-    /* Uncertain: c.describe() on a Child — py_lsp_cross must see Child inherits Base
-     * (requires INHERITS edge resolution).  Given the Python extraction bug for
-     * base_classes, this may be RED end-to-end even if py_lsp_cross is correct.
-     * Assert the correct outcome; RED if extraction bug blocks resolution. */
-    ASSERT_TRUE(lrp_assert_calls(f, 2, 1, "python/S6/inherited_method", 0));
+    /* RED→TRIPWIRE: c.describe() needs py_lsp_cross to walk `Child(Base)`. The
+     * INHERITS edge IS extracted (the probe diagnostic shows INHERITS=1); the gap
+     * is in py_lsp_cross's cross-file inheritance RESOLUTION for an unannotated
+     * receiver, not extraction. Until the G2 weak-suppression guard (#1386)
+     * landed, this scenario passed via a unique_name registry fallback —
+     * "describe" is unique in this 2-file fixture, so a weak short-name guess
+     * happened to be right. In a real repo the same guess binds an arbitrary
+     * same-named method on an unrelated class (prior_cp.get → SessionRegistry.get),
+     * so G2 now suppresses weak member-call matches with an unresolved receiver.
+     * c.describe() is the ONLY call in the fixture, so a correctly-suppressed
+     * run yields exactly zero CALLS. (Upstream has no Python suppression and
+     * still marks this expect_green=0 — it passes there only incidentally via
+     * the same weak guess.) Tripwire: assert store opened AND calls == 0 exactly
+     * (an infra/DB failure must not vacuously pass); flip to ASSERT calls >= 1
+     * once py_lsp_cross resolves inheritance for unannotated receivers. */
+    LRP_Proj lp;
+    cbm_store_t *store = lrp_index(&lp, f, 2);
+    ASSERT_NOT_NULL(store);
+    int calls = cbm_store_count_edges_by_type(store, lp.project, "CALLS");
+    lrp_cleanup(&lp, store);
+    ASSERT_EQ(calls, 0);
     PASS();
 }
 
