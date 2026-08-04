@@ -2886,7 +2886,7 @@ static int store_bfs(cbm_store_t *s, int64_t start_id, const char *direction,
     int cap = ST_INIT_CAP_16;
     int n = 0;
     int cte_rows = 0;
-    cbm_node_hop_t *visited = malloc(cap * sizeof(cbm_node_hop_t));
+    cbm_node_hop_t *visited = calloc(cap, sizeof(cbm_node_hop_t));
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (n >= cap) {
@@ -3030,7 +3030,7 @@ int cbm_store_bfs_multi(cbm_store_t *s, const int64_t *seed_ids, int seed_count,
 
     int cap = ST_INIT_CAP_16;
     int n = 0;
-    cbm_node_hop_t *visited = malloc(cap * sizeof(cbm_node_hop_t));
+    cbm_node_hop_t *visited = calloc(cap, sizeof(cbm_node_hop_t));
     int scan_rc16;
     while ((scan_rc16 = sqlite3_step(stmt)) == SQLITE_ROW) {
         if (n > max_results) {

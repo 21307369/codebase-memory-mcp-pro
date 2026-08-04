@@ -62,6 +62,8 @@ enum {
 #include "pipeline/artifact.h"
 
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <process.h>
 #define getpid _getpid
 #else
@@ -1804,6 +1806,27 @@ static int sg_parse_fields(const char *args, const char *out[], int max_out, yyj
     return n;
 }
 
+/* Append a property as one compact-output cell. Compound values stay one
+ * column by using their compact JSON representation; the cell emitter quotes
+ * and escapes that representation as needed. */
+static void sg_toon_property_cell(cbm_sb_t *sb, yyjson_val *v) {
+    if (v && yyjson_is_str(v)) {
+        cbm_tree_cell_str(sb, yyjson_get_str(v), false);
+    } else if (v && yyjson_is_bool(v)) {
+        cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
+    } else if (v && yyjson_is_int(v)) {
+        cbm_tree_cell_int(sb, yyjson_get_int(v), false);
+    } else if (v && yyjson_is_real(v)) {
+        cbm_tree_cell_real(sb, yyjson_get_real(v), false);
+    } else if (v && !yyjson_is_null(v)) {
+        char *json = yyjson_val_write(v, 0, NULL);
+        cbm_tree_cell_str(sb, json ? json : "", false);
+        free(json);
+    } else {
+        cbm_tree_cell_str(sb, "", false);
+    }
+}
+
 /* Append one row's extra-field cells, pulled from the node's properties. */
 static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char *const *fields,
                                 int nfields) {
@@ -1812,17 +1835,7 @@ static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char
     yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
     for (int f = 0; f < nfields; f++) {
         yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-        if (v && yyjson_is_str(v)) {
-            cbm_tree_cell_str(sb, yyjson_get_str(v), false);
-        } else if (v && yyjson_is_bool(v)) {
-            cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
-        } else if (v && yyjson_is_int(v)) {
-            cbm_tree_cell_int(sb, yyjson_get_int(v), false);
-        } else if (v && yyjson_is_real(v)) {
-            cbm_tree_cell_real(sb, yyjson_get_real(v), false);
-        } else {
-            cbm_tree_cell_str(sb, "", false);
-        }
+        sg_toon_property_cell(sb, v);
     }
     if (pd) {
         yyjson_doc_free(pd);
@@ -1954,17 +1967,7 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
             yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
             for (int f = 0; f < nfields; f++) {
                 yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    cbm_tree_cell_str(sb, yyjson_get_str(v), false);
-                } else if (v && yyjson_is_int(v)) {
-                    cbm_tree_cell_int(sb, yyjson_get_int(v), false);
-                } else if (v && yyjson_is_real(v)) {
-                    cbm_tree_cell_real(sb, yyjson_get_real(v), false);
-                } else if (v && yyjson_is_bool(v)) {
-                    cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
-                } else {
-                    cbm_tree_cell_str(sb, "", false); /* emits "-" */
-                }
+                sg_toon_property_cell(sb, v);
             }
             if (pd) {
                 yyjson_doc_free(pd);
@@ -2046,14 +2049,10 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
             yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
             for (int f = 0; f < nfields; f++) {
                 yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    yyjson_mut_arr_add_strcpy(doc, row, yyjson_get_str(v));
-                } else if (v && yyjson_is_int(v)) {
-                    yyjson_mut_arr_add_int(doc, row, yyjson_get_int(v));
-                } else if (v && yyjson_is_real(v)) {
-                    yyjson_mut_arr_add_real(doc, row, yyjson_get_real(v));
-                } else if (v && yyjson_is_bool(v)) {
-                    yyjson_mut_arr_add_bool(doc, row, yyjson_get_bool(v));
+                yyjson_mut_val *copy =
+                    (v && !yyjson_is_null(v)) ? yyjson_val_mut_copy(doc, v) : NULL;
+                if (copy) {
+                    yyjson_mut_arr_add_val(row, copy);
                 } else {
                     yyjson_mut_arr_add_null(doc, row);
                 }
@@ -6429,6 +6428,13 @@ int cbm_mcp_server_run(cbm_mcp_server_t *srv, FILE *in, FILE *out) {
     char *line = NULL;
     size_t cap = 0;
     int fd = cbm_fileno(in);
+
+#ifdef _WIN32
+    /* Ensure stdio is in binary mode to prevent CRLF translation from corrupting
+     * Content-Length byte counts and causing fread() to hang. */
+    _setmode(cbm_fileno(in), _O_BINARY);
+    _setmode(cbm_fileno(out), _O_BINARY);
+#endif
 
     for (;;) {
         /* Poll with idle timeout so we can evict unused stores between requests.
