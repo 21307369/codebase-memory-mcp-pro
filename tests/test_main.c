@@ -96,6 +96,7 @@ extern void suite_grammar_probe_g(void);
 extern void suite_incremental(void);
 extern void suite_simhash(void);
 extern void suite_stack_overflow(void);
+extern void suite_mcp(void);
 
 /* Free the main thread's thread-local node-type bitset cache before exit so
  * LeakSanitizer (Linux x64) doesn't report it. Worker threads free their own
@@ -242,6 +243,8 @@ int main(void) {
     RUN_SUITE(grammar_probe_g);
 
     RUN_SUITE(incremental);
+
+    RUN_SUITE(mcp);
 
     /* Release process-lifetime caches so LeakSanitizer reports no leaks. */
     cbm_kind_in_set_free_cache();

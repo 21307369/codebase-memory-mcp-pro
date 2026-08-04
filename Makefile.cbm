@@ -319,10 +319,8 @@ TEST_STORE_SRCS = \
 TEST_CYPHER_SRCS = \
     tests/test_cypher.c
 
-TEST_MCP_SRCS =
-# TODO(merge-damage): tests/test_mcp.c excluded — upstream PR reapply pasted duplicate
-# sections (triple SNIPPET TESTS copy, lost #endif in POLL/GETLINE #ifndef _WIN32,
-# truncated TEST bodies). Rebuild from deusdata/main and re-port fork tests to restore.
+TEST_MCP_SRCS = \
+    tests/test_mcp.c
 
 TEST_DISCOVER_SRCS = \
     tests/test_language.c \
