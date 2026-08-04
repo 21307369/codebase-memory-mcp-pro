@@ -111,7 +111,8 @@ FOUNDATION_SRCS = \
     src/foundation/compat_regex.c \
     src/foundation/mem.c \
     src/foundation/diagnostics.c \
-    src/foundation/profile.c
+    src/foundation/profile.c \
+    src/foundation/index_limits.c
 
 # Existing extraction C code (compiled from current location)
 EXTRACTION_SRCS = \
@@ -296,7 +297,8 @@ TEST_FOUNDATION_SRCS = \
     tests/test_str_intern.c \
     tests/test_log.c \
     tests/test_str_util.c \
-    tests/test_platform.c
+    tests/test_platform.c \
+    tests/test_index_limits.c
 
 TEST_EXTRACTION_SRCS = \
     tests/test_extraction.c \

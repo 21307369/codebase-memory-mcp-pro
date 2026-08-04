@@ -114,6 +114,9 @@ cbm_system_info_t cbm_system_info(void);
  * initial=false: max(1, perf_cores-1) (leave headroom for user apps) */
 int cbm_default_worker_count(bool initial);
 
+/* Available bytes on the filesystem containing an existing path. */
+bool cbm_disk_free_bytes(const char *path, uint64_t *bytes_out);
+
 /* ── Environment variables ──────────────────────────────────────── */
 
 /* Thread-safe getenv: copies the value into a caller-provided buffer.

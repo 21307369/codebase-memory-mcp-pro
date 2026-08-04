@@ -3408,6 +3408,124 @@ static void build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     }
 }
 
+/* Load the persisted index resource policy from the server config and apply
+ * it to the pipeline. A corrupt stored value falls back to defaults: indexing
+ * must never be bricked by a bad config value. */
+static void apply_config_index_limits(cbm_pipeline_t *p, cbm_mcp_server_t *srv) {
+    if (!p) {
+        return;
+    }
+    cbm_index_limits_t limits;
+    char error[256];
+    if (!cbm_config_load_index_limits(srv ? srv->config : NULL, &limits, error, sizeof(error))) {
+        cbm_log_warn("index.limits", "msg", "invalid stored index_* value; using defaults", "error",
+                     error);
+        cbm_index_limits_defaults(&limits);
+    }
+    cbm_pipeline_set_index_limits(p, &limits);
+}
+
+/* Stable config key that remediates a pipeline limit violation. */
+static const char *pipeline_limit_config_key(cbm_pipeline_limit_t limit) {
+    switch (limit) {
+    case CBM_PIPELINE_LIMIT_STAGING_BYTES:
+        return "index_max_staging_mb";
+    case CBM_PIPELINE_LIMIT_DATABASE_BYTES:
+        return "index_max_db_mb";
+    case CBM_PIPELINE_LIMIT_FREE_DISK_BYTES:
+        return "index_min_free_disk_mb";
+    case CBM_PIPELINE_LIMIT_CACHE_BYTES:
+        return "index_cache_max_mb";
+    case CBM_PIPELINE_LIMIT_TASK_TEMP_BYTES:
+        return "index_max_task_temp_mb";
+    default:
+        return NULL;
+    }
+}
+
+/* Stable config key that remediates a discovery limit violation. */
+static const char *discover_limit_config_key(cbm_discover_limit_t limit) {
+    switch (limit) {
+    case CBM_DISCOVER_LIMIT_FILES:
+        return "index_max_files";
+    case CBM_DISCOVER_LIMIT_DIRECTORIES:
+        return "index_max_directories";
+    case CBM_DISCOVER_LIMIT_ENTRIES:
+        return "index_max_entries";
+    case CBM_DISCOVER_LIMIT_DEPTH:
+        return "index_max_depth";
+    case CBM_DISCOVER_LIMIT_SOURCE_BYTES:
+        return "index_max_source_mb";
+    case CBM_DISCOVER_LIMIT_DEADLINE:
+        return "index_scan_timeout_seconds";
+    default:
+        return NULL;
+    }
+}
+
+/* Structured resource-limit error for index_repository: names the violated
+ * resource, the observed and configured values, and the config key that
+ * remediates it. */
+static void add_resource_limit_error(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                     cbm_pipeline_t *p) {
+    yyjson_mut_obj_add_str(doc, root, "outcome", "resource_limit_exceeded");
+    char observed_text[32];
+    char limit_text[32];
+
+    cbm_pipeline_limit_report_t limit_report = {0};
+    cbm_pipeline_get_limit_violation(p, &limit_report);
+    if (limit_report.violation != CBM_PIPELINE_LIMIT_NONE) {
+        const char *name = cbm_pipeline_limit_name(limit_report.violation);
+        const char *key = pipeline_limit_config_key(limit_report.violation);
+        (void)snprintf(observed_text, sizeof(observed_text), "%llu",
+                       (unsigned long long)limit_report.observed);
+        (void)snprintf(limit_text, sizeof(limit_text), "%llu",
+                       (unsigned long long)limit_report.limit);
+        yyjson_mut_obj_add_str(doc, root, "resource", name);
+        yyjson_mut_obj_add_strcpy(doc, root, "observed", observed_text);
+        yyjson_mut_obj_add_strcpy(doc, root, "limit", limit_text);
+        if (key) {
+            char hint[160];
+            (void)snprintf(hint, sizeof(hint),
+                           "Raise or disable the %s setting (codebase-memory-mcp config set %s "
+                           "<value>)",
+                           key, key);
+            yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
+        }
+        return;
+    }
+
+    cbm_discover_report_t discover_report = {0};
+    cbm_pipeline_get_resource_violation(p, &discover_report);
+    if (discover_report.violation != CBM_DISCOVER_LIMIT_NONE) {
+        const char *name = cbm_discover_limit_name(discover_report.violation);
+        const char *key = discover_limit_config_key(discover_report.violation);
+        (void)snprintf(observed_text, sizeof(observed_text), "%llu",
+                       (unsigned long long)discover_report.observed);
+        (void)snprintf(limit_text, sizeof(limit_text), "%llu",
+                       (unsigned long long)discover_report.limit);
+        yyjson_mut_obj_add_str(doc, root, "resource", name);
+        yyjson_mut_obj_add_strcpy(doc, root, "observed", observed_text);
+        yyjson_mut_obj_add_strcpy(doc, root, "limit", limit_text);
+        if (key) {
+            char hint[160];
+            (void)snprintf(hint, sizeof(hint),
+                           "Raise or disable the %s setting (codebase-memory-mcp config set %s "
+                           "<value>)",
+                           key, key);
+            yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
+        }
+        return;
+    }
+
+    /* Root-safety refusal: neither report carries it, but the run still failed
+     * the resource policy (filesystem root / home / cache / denied root). */
+    yyjson_mut_obj_add_str(doc, root, "resource", "repository_root");
+    yyjson_mut_obj_add_str(doc, root, "hint",
+                           "The requested root is the filesystem root, home, cache directory, or a "
+                           "configured denied root; index a repository subdirectory instead.");
+}
+
 static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
     char *mode_str = cbm_mcp_get_string_arg(args, "mode");
@@ -3441,6 +3559,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result("failed to create pipeline", true);
     }
     cbm_pipeline_set_persistence(p, persistence);
+    apply_config_index_limits(p, srv);
 
     char *project_name = heap_strdup(cbm_pipeline_project_name(p));
 
@@ -3489,9 +3608,14 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     yyjson_mut_obj_add_str(doc, root, "status", rc == 0 ? "indexed" : "error");
 
     if (rc != 0) {
-        yyjson_mut_obj_add_str(doc, root, "hint",
-                               "Pipeline failed. Check repo_path exists and contains source files. "
-                               "Try mode='fast' for a quicker diagnostic run.");
+        if (rc == CBM_PIPELINE_RESOURCE_LIMIT) {
+            add_resource_limit_error(doc, root, p);
+        } else {
+            yyjson_mut_obj_add_str(doc, root, "hint",
+                                   "Pipeline failed. Check repo_path exists and contains source "
+                                   "files. "
+                                   "Try mode='fast' for a quicker diagnostic run.");
+        }
     }
 
     if (rc == 0) {
@@ -6031,6 +6155,7 @@ static void *autoindex_thread(void *arg) {
         cbm_log_warn("autoindex.err", "msg", "pipeline_create_failed");
         return NULL;
     }
+    apply_config_index_limits(p, srv);
 
     /* Block until any concurrent pipeline finishes */
     cbm_pipeline_lock();

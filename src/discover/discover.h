@@ -117,15 +117,53 @@ typedef struct {
     int64_t size;         /* file size in bytes */
 } cbm_file_info_t;
 
+typedef enum {
+    CBM_DISCOVER_LIMIT_NONE = 0,
+    CBM_DISCOVER_LIMIT_FILES,
+    CBM_DISCOVER_LIMIT_DIRECTORIES,
+    CBM_DISCOVER_LIMIT_ENTRIES,
+    CBM_DISCOVER_LIMIT_DEPTH,
+    CBM_DISCOVER_LIMIT_SOURCE_BYTES,
+    CBM_DISCOVER_LIMIT_DEADLINE,
+} cbm_discover_limit_t;
+
 typedef struct {
-    cbm_index_mode_t mode;   /* CBM_MODE_FULL or CBM_MODE_FAST */
-    const char *ignore_file; /* path to .cbmignore file, or NULL */
-    int64_t max_file_size;   /* 0 = no limit */
+    uint64_t max_files;        /* 0 = disabled */
+    uint64_t max_directories;  /* root counts as one; 0 = disabled */
+    uint64_t max_entries;      /* all examined directory entries; 0 = disabled */
+    uint64_t max_depth;        /* root is depth zero; 0 = disabled */
+    uint64_t max_source_bytes; /* accepted source files only; 0 = disabled */
+    uint64_t deadline_ms;      /* absolute cbm_now_ms deadline; 0 = disabled */
+} cbm_discover_limits_t;
+
+typedef struct {
+    cbm_discover_limit_t violation;
+    uint64_t observed;
+    uint64_t limit;
+} cbm_discover_report_t;
+
+typedef struct {
+    cbm_index_mode_t mode;               /* CBM_MODE_FULL or CBM_MODE_FAST */
+    const char *ignore_file;             /* path to .cbmignore file, or NULL */
+    int64_t max_file_size;               /* 0 = no limit */
+    const cbm_discover_limits_t *limits; /* NULL = legacy unbounded walk */
+    cbm_discover_report_t *report;       /* optional exact limit diagnostic */
 } cbm_discover_opts_t;
+
+typedef enum {
+    CBM_DISCOVER_OK = 0,
+    CBM_DISCOVER_LIMIT_EXCEEDED = 1,
+    CBM_DISCOVER_ERROR = -1,
+} cbm_discover_status_t;
+
+/* Stable machine-readable name for a discovery limit. */
+const char *cbm_discover_limit_name(cbm_discover_limit_t limit);
 
 /* Walk a repository directory tree and discover all source files.
  * Applies hardcoded filters, gitignore patterns, and language detection.
- * Returns 0 on success, -1 on error.
+ * Returns 0 on success, CBM_DISCOVER_LIMIT_EXCEEDED (1) when a configured
+ * discovery limit was reached (partial results are discarded, *out is NULL),
+ * or CBM_DISCOVER_ERROR (-1) on error.
  * Caller must call cbm_discover_free() on the results. */
 int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
                  int *count);
@@ -138,7 +176,9 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
  * owns it and must free via cbm_discover_free_excluded(). Pass NULL for
  * excluded_out (and/or excluded_count_out) to discard the list — the internal
  * accumulator is freed in that case (no leak).
- * Returns 0 on success, -1 on error. */
+ * Returns 0 on success, CBM_DISCOVER_LIMIT_EXCEEDED (1) when a configured
+ * discovery limit was reached (partial results are discarded), or
+ * CBM_DISCOVER_ERROR (-1) on error. */
 int cbm_discover_ex(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
                     int *count, char ***excluded_out, int *excluded_count_out);
 
@@ -163,7 +203,10 @@ enum { CBM_DISCOVER_IGNORED_CAP = 2000 };
  * a heap array (caller frees via cbm_discover_free_ignored),
  * *ignored_count_out its stored length (<= CBM_DISCOVER_IGNORED_CAP), and
  * *ignored_total_out the TOTAL number of ignored files seen. Pass NULL to
- * skip the collection entirely. */
+ * skip the collection entirely.
+ * Returns 0 on success, CBM_DISCOVER_LIMIT_EXCEEDED (1) when a configured
+ * discovery limit was reached (partial results are discarded), or
+ * CBM_DISCOVER_ERROR (-1) on error. */
 int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm_file_info_t **out,
                      int *count, char ***excluded_out, int *excluded_count_out,
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,

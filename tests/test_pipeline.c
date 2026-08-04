@@ -5815,6 +5815,134 @@ TEST(incremental_new_file_added) {
     PASS();
 }
 
+TEST(discovery_resource_limit_preserves_committed_db) {
+    if (setup_incremental_repo() != 0) {
+        FAIL("setup failed");
+    }
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    char *project = strdup(cbm_pipeline_project_name(p));
+    cbm_pipeline_free(p);
+    ASSERT_NOT_NULL(project);
+
+    cbm_store_t *live = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(live);
+    int baseline_nodes = cbm_store_count_nodes(live, project);
+    cbm_store_close(live);
+    ASSERT_GT(baseline_nodes, 0);
+
+    cbm_index_limits_t limits;
+    cbm_index_limits_defaults(&limits);
+    limits.max_files = 1;
+    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    cbm_pipeline_set_index_limits(p, &limits);
+    int rc = cbm_pipeline_run(p);
+    cbm_discover_report_t report = {0};
+    cbm_pipeline_get_resource_violation(p, &report);
+    cbm_pipeline_free(p);
+
+    live = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(live);
+    bool live_valid = cbm_store_check_integrity(live);
+    int nodes_after = cbm_store_count_nodes(live, project);
+    cbm_store_close(live);
+
+    free(project);
+    cleanup_incremental_repo();
+
+    ASSERT_EQ(rc, CBM_PIPELINE_RESOURCE_LIMIT);
+    ASSERT_EQ(report.violation, CBM_DISCOVER_LIMIT_FILES);
+    ASSERT_EQ(report.limit, 1);
+    ASSERT_TRUE(live_valid);
+    ASSERT_EQ(nodes_after, baseline_nodes);
+    PASS();
+}
+
+TEST(storage_resource_limits_preserve_committed_db) {
+    if (setup_incremental_repo() != 0) {
+        FAIL("setup failed");
+    }
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    char *project = strdup(cbm_pipeline_project_name(p));
+    cbm_pipeline_free(p);
+    ASSERT_NOT_NULL(project);
+
+    cbm_store_t *live = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(live);
+    int baseline_nodes = cbm_store_count_nodes(live, project);
+    cbm_store_close(live);
+    ASSERT_GT(baseline_nodes, 0);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/resource_candidate.go", g_incr_tmpdir);
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "package main\n\nfunc ResourceCandidate() int { return 44 }\n");
+    fclose(f);
+
+    /* Free-disk refusal is a PRE-FLIGHT check: nothing has been replaced, so
+     * the committed DB must be untouched and the candidate unpublished. */
+    cbm_index_limits_t limits;
+    cbm_pipeline_limit_report_t report = {0};
+    cbm_index_limits_defaults(&limits);
+    limits.min_free_disk_bytes = UINT64_MAX;
+    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    cbm_pipeline_set_index_limits(p, &limits);
+    int disk_rc = cbm_pipeline_run(p);
+    cbm_pipeline_get_limit_violation(p, &report);
+    cbm_pipeline_free(p);
+    bool disk_identified = report.violation == CBM_PIPELINE_LIMIT_FREE_DISK_BYTES &&
+                           report.observed < report.limit && report.limit == UINT64_MAX;
+
+    live = cbm_store_open_path(g_incr_dbpath);
+    ASSERT_NOT_NULL(live);
+    bool preserved_valid = cbm_store_check_integrity(live);
+    int preserved_nodes = cbm_store_count_nodes(live, project);
+    int unpublished_before = count_nodes_named(live, project, "ResourceCandidate");
+    cbm_store_close(live);
+
+    /* Database-size refusal is checked after the commit: the fork writes the
+     * DB in place (no staging layer to roll back), so an oversized result is
+     * deleted and NO out-of-policy index survives (the previous index was
+     * already replaced by this run). The run still returns
+     * CBM_PIPELINE_RESOURCE_LIMIT with the size violation identified. FAST
+     * mode re-runs over the FULL-mode baseline through the INCREMENTAL route
+     * (full covers fast), exercising the incremental post-commit check. */
+    cbm_index_limits_defaults(&limits);
+    limits.max_db_bytes = 1;
+    p = cbm_pipeline_new(g_incr_tmpdir, g_incr_dbpath, CBM_MODE_FAST);
+    ASSERT_NOT_NULL(p);
+    cbm_pipeline_set_index_limits(p, &limits);
+    int database_rc = cbm_pipeline_run(p);
+    cbm_pipeline_get_limit_violation(p, &report);
+    cbm_pipeline_free(p);
+    bool database_identified = report.violation == CBM_PIPELINE_LIMIT_DATABASE_BYTES &&
+                               report.observed > report.limit && report.limit == 1;
+
+    struct stat deleted_st;
+    bool db_deleted = stat(g_incr_dbpath, &deleted_st) != 0;
+
+    free(project);
+    cleanup_incremental_repo();
+
+    ASSERT_EQ(disk_rc, CBM_PIPELINE_RESOURCE_LIMIT);
+    ASSERT_TRUE(disk_identified);
+    ASSERT_EQ(database_rc, CBM_PIPELINE_RESOURCE_LIMIT);
+    ASSERT_TRUE(database_identified);
+    ASSERT_TRUE(preserved_valid);
+    ASSERT_EQ(preserved_nodes, baseline_nodes);
+    ASSERT_EQ(unpublished_before, 0);
+    ASSERT_TRUE(db_deleted);
+    PASS();
+}
+
 TEST(incremental_fast_preserves_mode_skipped_tools_dir) {
     /* Regression: 2026-04-13. A fast-mode reindex after a full-mode index
      * was silently destroying every file under FAST_SKIP_DIRS directories
@@ -6982,6 +7110,8 @@ SUITE(pipeline) {
     RUN_TEST(incremental_detects_changed_file);
     RUN_TEST(incremental_detects_deleted_file);
     RUN_TEST(incremental_new_file_added);
+    RUN_TEST(discovery_resource_limit_preserves_committed_db);
+    RUN_TEST(storage_resource_limits_preserve_committed_db);
     RUN_TEST(incremental_fast_preserves_mode_skipped_tools_dir);
     RUN_TEST(incremental_k8s_manifest_indexed);
     RUN_TEST(incremental_kustomize_module_indexed);

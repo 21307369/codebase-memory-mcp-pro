@@ -3,6 +3,8 @@
  */
 #include "test_framework.h"
 #include "../src/foundation/compat.h" /* cbm_setenv / cbm_unsetenv (Windows-portable) */
+#include "../src/foundation/compat_fs.h" /* cbm_fopen / cbm_directory_size_bounded */
+#include "../src/foundation/constants.h" /* CBM_SZ_512 / CBM_SZ_1K */
 #include "../src/foundation/platform.h"
 #include "../src/foundation/system_info_internal.h"
 #include <stdlib.h>
@@ -131,6 +133,48 @@ TEST(platform_default_workers_env_unset) {
     ASSERT_EQ(cbm_default_worker_count(true), info.total_cores);
     PASS();
 }
+
+#ifndef _WIN32
+TEST(platform_directory_size_is_bounded_and_does_not_follow_symlinks) {
+    char base[CBM_SZ_512];
+    int written = snprintf(base, sizeof(base), "/tmp/cbm-dir-size-XXXXXX");
+    ASSERT_TRUE(written > 0 && written < (int)sizeof(base));
+    ASSERT_NOT_NULL(cbm_mkdtemp(base));
+
+    char first[CBM_SZ_1K];
+    char second[CBM_SZ_1K];
+    char loop[CBM_SZ_1K];
+    written = snprintf(first, sizeof(first), "%s/first", base);
+    ASSERT_TRUE(written > 0 && written < (int)sizeof(first));
+    written = snprintf(second, sizeof(second), "%s/second", base);
+    ASSERT_TRUE(written > 0 && written < (int)sizeof(second));
+    written = snprintf(loop, sizeof(loop), "%s/loop", base);
+    ASSERT_TRUE(written > 0 && written < (int)sizeof(loop));
+
+    FILE *file = fopen(first, "wb");
+    ASSERT_NOT_NULL(file);
+    ASSERT_EQ(fwrite("1234", 1, 4, file), 4);
+    ASSERT_EQ(fclose(file), 0);
+    file = fopen(second, "wb");
+    ASSERT_NOT_NULL(file);
+    ASSERT_EQ(fwrite("123456", 1, 6, file), 6);
+    ASSERT_EQ(fclose(file), 0);
+    ASSERT_EQ(symlink(base, loop), 0);
+
+    uint64_t complete = 0;
+    uint64_t bounded = 0;
+    ASSERT_TRUE(cbm_directory_size_bounded(base, UINT64_MAX, &complete));
+    ASSERT_TRUE(cbm_directory_size_bounded(base, 3, &bounded));
+
+    ASSERT_EQ(cbm_unlink(loop), 0);
+    ASSERT_EQ(cbm_unlink(first), 0);
+    ASSERT_EQ(cbm_unlink(second), 0);
+    ASSERT_EQ(cbm_rmdir(base), 0);
+    ASSERT_EQ(complete, 10);
+    ASSERT_GT(bounded, 3);
+    PASS();
+}
+#endif
 
 /* ── cgroup-aware detection (Linux only) ─────────────────────────── */
 
@@ -316,6 +360,9 @@ SUITE(platform) {
     RUN_TEST(platform_default_workers_env_override);
     RUN_TEST(platform_default_workers_env_invalid);
     RUN_TEST(platform_default_workers_env_unset);
+#ifndef _WIN32
+    RUN_TEST(platform_directory_size_is_bounded_and_does_not_follow_symlinks);
+#endif
 #ifdef __linux__
     RUN_TEST(cgroup_v2_cpu_quota);
     RUN_TEST(cgroup_v2_cpu_quota_rounds_up);

@@ -82,6 +82,9 @@ struct cbm_pipeline {
     cbm_index_mode_t mode;
     atomic_int cancelled;
     bool persistence; /* write .codebase-memory/graph.db.zst after indexing */
+    cbm_index_limits_t index_limits;
+    cbm_discover_report_t resource_violation;
+    cbm_pipeline_limit_report_t limit_violation;
 
     /* Indexing state (set during run) */
     cbm_gbuf_t *gbuf;
@@ -236,9 +239,49 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
     p->branch_qn = cbm_git_context_branch_qn(p->project_name, &p->git_ctx);
     p->mode = mode;
     p->persistence = false;
+    cbm_index_limits_defaults(&p->index_limits);
     atomic_init(&p->cancelled, 0);
 
     return p;
+}
+
+void cbm_pipeline_set_index_limits(cbm_pipeline_t *p, const cbm_index_limits_t *limits) {
+    if (p && limits) {
+        p->index_limits = *limits;
+    }
+}
+
+void cbm_pipeline_get_resource_violation(const cbm_pipeline_t *p, cbm_discover_report_t *report) {
+    if (!report) {
+        return;
+    }
+    *report = p ? p->resource_violation : (cbm_discover_report_t){0};
+}
+
+void cbm_pipeline_get_limit_violation(const cbm_pipeline_t *p,
+                                      cbm_pipeline_limit_report_t *report) {
+    if (!report) {
+        return;
+    }
+    *report = p ? p->limit_violation : (cbm_pipeline_limit_report_t){0};
+}
+
+const char *cbm_pipeline_limit_name(cbm_pipeline_limit_t limit) {
+    switch (limit) {
+    case CBM_PIPELINE_LIMIT_NONE:
+        return "none";
+    case CBM_PIPELINE_LIMIT_STAGING_BYTES:
+        return "staging_bytes";
+    case CBM_PIPELINE_LIMIT_DATABASE_BYTES:
+        return "database_bytes";
+    case CBM_PIPELINE_LIMIT_FREE_DISK_BYTES:
+        return "free_disk_bytes";
+    case CBM_PIPELINE_LIMIT_CACHE_BYTES:
+        return "cache_bytes";
+    case CBM_PIPELINE_LIMIT_TASK_TEMP_BYTES:
+        return "task_temp_bytes";
+    }
+    return "unknown";
 }
 
 void cbm_pipeline_set_persistence(cbm_pipeline_t *p, bool enabled) {
@@ -1130,6 +1173,9 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     }
 
     int worker_count = cbm_default_worker_count(true);
+    if (p->index_limits.cpu_cores > 0 && worker_count > p->index_limits.cpu_cores) {
+        worker_count = p->index_limits.cpu_cores;
+    }
     CBM_PROF_START(t_extract_total);
     int rc = (worker_count > SKIP_ONE && file_count > MIN_FILES_FOR_PARALLEL)
                  ? run_parallel_pipeline(p, ctx, files, file_count, worker_count, &t)
@@ -1141,6 +1187,122 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     return rc;
 }
 
+static int pipeline_limit_failed(cbm_pipeline_t *p, cbm_pipeline_limit_t violation,
+                                 uint64_t observed, uint64_t limit) {
+    p->limit_violation = (cbm_pipeline_limit_report_t){
+        .violation = violation,
+        .observed = observed,
+        .limit = limit,
+    };
+    char observed_text[32];
+    char limit_text[32];
+    (void)snprintf(observed_text, sizeof(observed_text), "%llu", (unsigned long long)observed);
+    (void)snprintf(limit_text, sizeof(limit_text), "%llu", (unsigned long long)limit);
+    cbm_log_warn("pipeline.resource_limit", "limit", cbm_pipeline_limit_name(violation), "observed",
+                 observed_text, "configured", limit_text);
+    return CBM_PIPELINE_RESOURCE_LIMIT;
+}
+
+static uint64_t db_footprint_bytes(const char *path) {
+    static const char *suffixes[] = {"", "-wal", "-shm", "-journal"};
+    uint64_t total = 0;
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        char artifact[CBM_SZ_4K];
+        int written = snprintf(artifact, sizeof(artifact), "%s%s", path, suffixes[i]);
+        if (written <= 0 || (size_t)written >= sizeof(artifact)) {
+            return UINT64_MAX;
+        }
+        struct stat info;
+        if (stat(artifact, &info) != 0 || info.st_size <= 0) {
+            continue;
+        }
+        uint64_t size = (uint64_t)info.st_size;
+        total = size > UINT64_MAX - total ? UINT64_MAX : total + size;
+    }
+    return total;
+}
+
+static bool db_parent_path(const char *path, char *parent, size_t parent_size) {
+    if (!path || !parent || parent_size == 0) {
+        return false;
+    }
+    int written = snprintf(parent, parent_size, "%s", path);
+    if (written <= 0 || (size_t)written >= parent_size) {
+        return false;
+    }
+    char *slash = strrchr(parent, '/');
+#ifdef _WIN32
+    char *backslash = strrchr(parent, '\\');
+    if (backslash && (!slash || backslash > slash)) {
+        slash = backslash;
+    }
+#endif
+    if (!slash) {
+        return snprintf(parent, parent_size, ".") == 1;
+    }
+    if (slash == parent) {
+        slash[1] = '\0';
+    } else {
+        *slash = '\0';
+    }
+    return true;
+}
+
+/* Canonicalize a path (resolve symlinks, "..", "." and trailing-slash
+ * components) into out[out_size]. Returns false when the path cannot be
+ * resolved to an existing filesystem entry. */
+static bool canonicalize_path(const char *path, char *out, size_t out_size) {
+    if (!path || !path[0] || !out || out_size == 0) {
+        return false;
+    }
+#ifdef _WIN32
+    if (!_fullpath(out, path, (unsigned int)out_size)) {
+        return false;
+    }
+    cbm_normalize_path_sep(out);
+    return true;
+#else
+    return realpath(path, out) != NULL;
+#endif
+}
+
+/* Remove a SQLite database and its -wal/-shm/-journal sidecars. */
+static void delete_db_and_sidecars(const char *db_path) {
+    if (!db_path) {
+        return;
+    }
+    char sidecar[PL_WAL_BUF];
+    static const char *suffixes[] = {"-wal", "-shm", "-journal"};
+    cbm_unlink(db_path);
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        (void)snprintf(sidecar, sizeof(sidecar), "%s%s", db_path, suffixes[i]);
+        cbm_unlink(sidecar);
+    }
+}
+
+/* Post-commit resource policy (full-reindex AND incremental paths): the
+ * committed DB (including SQLite sidecars) must fit within max_db_bytes. The
+ * previous index was already replaced by this run, so an oversized result is
+ * deleted — the violation is reported and no out-of-policy index survives.
+ * (Discover-phase and free-disk violations run pre-flight, before the old
+ * index is touched, and do preserve the prior index.) */
+static int post_commit_db_check(cbm_pipeline_t *p) {
+    char *committed_db = resolve_db_path(p);
+    if (!committed_db) {
+        return CBM_NOT_FOUND;
+    }
+    uint64_t footprint = db_footprint_bytes(committed_db);
+    if (footprint > p->index_limits.max_db_bytes) {
+        delete_db_and_sidecars(committed_db);
+        int rc = pipeline_limit_failed(p, CBM_PIPELINE_LIMIT_DATABASE_BYTES, footprint,
+                                       p->index_limits.max_db_bytes);
+        free(committed_db);
+        return rc;
+    }
+    free(committed_db);
+    return 0;
+}
+
 int cbm_pipeline_run(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
@@ -1150,6 +1312,61 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
     cbm_path_alias_collection_t *path_aliases = NULL;
+
+    /* Resource policy: refuse roots that are too broad to be repositories
+     * (filesystem roots, home/cache directories, configured denied roots).
+     * cbm_index_root_allowed requires absolute canonical paths, so resolve
+     * the repo path (symlinks, "..", ".", trailing slashes) up front and use
+     * the canonical form for the whole run. Fail closed when it cannot be
+     * resolved. */
+    char canonical_repo[CBM_SZ_4K];
+    if (!canonicalize_path(p->repo_path, canonical_repo, sizeof(canonical_repo))) {
+        cbm_log_error("pipeline.err", "phase", "canonicalize", "path", p->repo_path);
+        return CBM_NOT_FOUND;
+    }
+    free(p->repo_path);
+    p->repo_path = strdup(canonical_repo);
+    char canonical_home[CBM_SZ_4K];
+    char canonical_cache[CBM_SZ_4K];
+    const char *home_root = cbm_get_home_dir();
+    const char *cache_root = cbm_resolve_cache_dir();
+    if (home_root && canonicalize_path(home_root, canonical_home, sizeof(canonical_home))) {
+        home_root = canonical_home;
+    }
+    if (cache_root && canonicalize_path(cache_root, canonical_cache, sizeof(canonical_cache))) {
+        cache_root = canonical_cache;
+    }
+
+    p->resource_violation = (cbm_discover_report_t){0};
+    p->limit_violation = (cbm_pipeline_limit_report_t){0};
+    char root_reason[64] = {0};
+    if (!cbm_index_root_allowed(p->repo_path, home_root, cache_root,
+                                p->index_limits.denied_roots, root_reason,
+                                sizeof(root_reason))) {
+        cbm_log_warn("pipeline.resource_limit", "limit", "root", "reason", root_reason);
+        return CBM_PIPELINE_RESOURCE_LIMIT;
+    }
+
+    /* Pre-flight: refuse to start when the filesystem cannot hold the index.
+     * Checked before any existing DB is replaced (the old index stays). */
+    char *final_db_path = resolve_db_path(p);
+    if (!final_db_path) {
+        return CBM_NOT_FOUND;
+    }
+    char parent_path[CBM_SZ_4K];
+    uint64_t free_disk_bytes = 0;
+    if (!db_parent_path(final_db_path, parent_path, sizeof(parent_path)) ||
+        !cbm_disk_free_bytes(parent_path, &free_disk_bytes)) {
+        free(final_db_path);
+        return CBM_NOT_FOUND;
+    }
+    if (free_disk_bytes < p->index_limits.min_free_disk_bytes) {
+        int limit_rc = pipeline_limit_failed(p, CBM_PIPELINE_LIMIT_FREE_DISK_BYTES, free_disk_bytes,
+                                             p->index_limits.min_free_disk_bytes);
+        free(final_db_path);
+        return limit_rc;
+    }
+    free(final_db_path);
 
     /* C/C++ #define Macro nodes (#375) dominate extraction on macro-dense repos
      * (≈49% of nodes on the Linux kernel), so gate them to full mode — moderate
@@ -1164,10 +1381,25 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
 
     /* Phase 1: Discover files */
     CBM_PROF_START(t_discover);
+    uint64_t now_ms = cbm_now_ms();
+    cbm_discover_limits_t discover_limits = {
+        .max_files = p->index_limits.max_files,
+        .max_directories = p->index_limits.max_directories,
+        .max_entries = p->index_limits.max_entries,
+        .max_depth = p->index_limits.max_depth,
+        .max_source_bytes = p->index_limits.max_source_bytes,
+        .deadline_ms = p->index_limits.scan_timeout_ms > UINT64_MAX - now_ms
+                           ? UINT64_MAX
+                           : now_ms + p->index_limits.scan_timeout_ms,
+    };
     cbm_discover_opts_t opts = {
         .mode = p->mode,
         .ignore_file = NULL,
-        .max_file_size = 0,
+        .max_file_size = p->index_limits.max_file_bytes > INT64_MAX
+                             ? INT64_MAX
+                             : (int64_t)p->index_limits.max_file_bytes,
+        .limits = &discover_limits,
+        .report = &p->resource_violation,
     };
     cbm_file_info_t *files = NULL;
     int file_count = 0;
@@ -1186,7 +1418,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     cbm_log_info("pipeline.discover", "files", itoa_buf(file_count), "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t0)));
     if (rc != 0 || check_cancel(p)) {
-        rc = CBM_NOT_FOUND;
+        rc = rc == CBM_DISCOVER_LIMIT_EXCEEDED ? CBM_PIPELINE_RESOURCE_LIMIT : CBM_NOT_FOUND;
         goto cleanup;
     }
 
@@ -1199,8 +1431,11 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         return rc;
     }
     if (rc >= 0) {
+        /* Incremental runs commit in place over the previous index — enforce
+         * the same post-commit size policy as the full-reindex path. */
+        int post_rc = post_commit_db_check(p);
         cbm_discover_free(files, file_count);
-        return rc;
+        return post_rc != 0 ? post_rc : rc;
     }
     cbm_log_info("pipeline.route", "path", "full");
 
@@ -1229,6 +1464,11 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     }
 
     rc = run_post_extraction(p, &ctx, files, file_count);
+    if (rc != 0) {
+        goto cleanup;
+    }
+
+    rc = post_commit_db_check(p);
     if (rc != 0) {
         goto cleanup;
     }

@@ -2537,8 +2537,40 @@ int cbm_config_get_int(cbm_config_t *cfg, const char *key, int default_val) {
     return (int)v;
 }
 
+bool cbm_config_load_index_limits(cbm_config_t *cfg, cbm_index_limits_t *limits, char *error,
+                                  size_t error_size) {
+    if (!limits) {
+        if (error && error_size > 0) {
+            (void)snprintf(error, error_size, "missing index resource policy");
+        }
+        return false;
+    }
+    cbm_index_limits_defaults(limits);
+    if (!cfg) {
+        return true;
+    }
+    for (size_t i = 0; i < cbm_index_limits_config_key_count(); i++) {
+        const char *key = cbm_index_limits_config_key_at(i);
+        const char *value = cbm_config_get(cfg, key, NULL);
+        if (value && !cbm_index_limits_set(limits, key, value, error, error_size)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int cbm_config_set(cbm_config_t *cfg, const char *key, const char *value) {
     if (!cfg || !key || !value) {
+        return CLI_ERR;
+    }
+    if (cbm_index_limits_is_config_key(key)) {
+        cbm_index_limits_t validated;
+        char error[CLI_BUF_256];
+        cbm_index_limits_defaults(&validated);
+        if (!cbm_index_limits_set(&validated, key, value, error, sizeof(error))) {
+            return CLI_ERR;
+        }
+    } else if (strncmp(key, "index_", sizeof("index_") - 1U) == 0) {
         return CLI_ERR;
     }
 
@@ -2587,6 +2619,15 @@ int cbm_cmd_config(int argc, char **argv) {
                "Enable auto-indexing on MCP session start");
         printf("  %-25s  default=%-10s  %s\n", CBM_CONFIG_AUTO_INDEX_LIMIT, "50000",
                "Max files for auto-indexing new projects");
+        printf("\nIndex resource keys (sizes are MiB, durations are seconds):\n");
+        for (size_t i = 0; i < cbm_index_limits_config_key_count(); i++) {
+            const char *key = cbm_index_limits_config_key_at(i);
+            char default_value[CLI_BUF_256];
+            if (cbm_index_limits_default_value(key, default_value, sizeof(default_value))) {
+                printf("  %-32s  default=%s\n", key, default_value[0] ? default_value : "(empty)");
+            }
+        }
+        printf("See docs/INDEX_RESOURCE_LIMITS.md for boundary semantics and ranges.\n");
         return 0;
     }
 
@@ -2612,6 +2653,13 @@ int cbm_cmd_config(int argc, char **argv) {
                cbm_config_get(cfg, CBM_CONFIG_AUTO_INDEX, "false"));
         printf("  %-25s = %-10s\n", CBM_CONFIG_AUTO_INDEX_LIMIT,
                cbm_config_get(cfg, CBM_CONFIG_AUTO_INDEX_LIMIT, "50000"));
+        for (size_t i = 0; i < cbm_index_limits_config_key_count(); i++) {
+            const char *key = cbm_index_limits_config_key_at(i);
+            char default_value[CLI_BUF_256];
+            if (cbm_index_limits_default_value(key, default_value, sizeof(default_value))) {
+                printf("  %-32s = %s\n", key, cbm_config_get(cfg, key, default_value));
+            }
+        }
     } else if (strcmp(argv[0], "get") == 0) {
         if (argc < MIN_ARGC_GET) {
             (void)fprintf(stderr, "Usage: config get <key>\n");
@@ -2624,7 +2672,24 @@ int cbm_cmd_config(int argc, char **argv) {
             (void)fprintf(stderr, "Usage: config set <key> <value>\n");
             rc = CLI_TRUE;
         } else {
-            if (cbm_config_set(cfg, argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]) == 0) {
+            const char *key = argv[CLI_SKIP_ONE];
+            const char *value = argv[CLI_PAIR_LEN];
+            char validation_error[CLI_BUF_256] = {0};
+            bool resource_value_valid = true;
+            if (cbm_index_limits_is_config_key(key)) {
+                cbm_index_limits_t validated;
+                cbm_index_limits_defaults(&validated);
+                resource_value_valid = cbm_index_limits_set(
+                    &validated, key, value, validation_error, sizeof(validation_error));
+            } else if (strncmp(key, "index_", sizeof("index_") - 1U) == 0) {
+                resource_value_valid = false;
+                (void)snprintf(validation_error, sizeof(validation_error),
+                               "unknown index resource key: %s", key);
+            }
+            if (!resource_value_valid) {
+                (void)fprintf(stderr, "error: %s\n", validation_error);
+                rc = CLI_TRUE;
+            } else if (cbm_config_set(cfg, key, value) == 0) {
                 printf("%s = %s\n", argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
             } else {
                 (void)fprintf(stderr, "error: failed to set %s\n", argv[CLI_SKIP_ONE]);

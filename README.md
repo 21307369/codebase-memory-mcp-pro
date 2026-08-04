@@ -516,6 +516,13 @@ codebase-memory-mcp config set auto_index_limit 50000    # max files for auto-in
 codebase-memory-mcp config reset auto_index              # reset to default
 ```
 
+Repository indexing has bounded defaults for root breadth, discovery,
+parallel worker count, committed database size, and reserved free disk. See
+[docs/INDEX_RESOURCE_LIMITS.md](docs/INDEX_RESOURCE_LIMITS.md) for the full
+list of enforced keys (worker memory, duration, staging, and cache limits are
+accepted for configuration compatibility but not enforced in this in-process
+build) and the exact failure semantics.
+
 ### Environment Variables
 
 | Variable | Default | Description |

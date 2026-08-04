@@ -617,6 +617,11 @@ TEST(cli_uninstall_confirmation_gate) {
     const char *raw = getenv("HOME");
     char *old_home = raw ? strdup(raw) : NULL;
     cbm_setenv("HOME", tmpdir, 1);
+    /* Isolate PATH so the real codebase-memory-mcp binary on the developer
+     * machine cannot be discovered while HOME is redirected (PR #1348). */
+    const char *raw_path = getenv("PATH");
+    char *old_path = raw_path ? strdup(raw_path) : NULL;
+    cbm_setenv("PATH", tmpdir, 1);
 
     char bin_path[1024];
     int setup_rc = setup_fake_install(tmpdir, bin_path, sizeof(bin_path));
@@ -634,6 +639,10 @@ TEST(cli_uninstall_confirmation_gate) {
     bool bin_after_yes = test_path_exists(bin_path);
     cbm_set_auto_answer_for_test(0);
 
+    if (old_path) {
+        cbm_setenv("PATH", old_path, 1);
+        free(old_path);
+    }
     if (old_home) {
         cbm_setenv("HOME", old_home, 1);
         free(old_home);
