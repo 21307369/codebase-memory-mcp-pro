@@ -14,6 +14,26 @@
 [![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned_every_release-brightgreen?logo=virustotal)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.27277-b31b1b?logo=arxiv)](https://arxiv.org/abs/2603.27277)
 
+> **🔱 Fork notice** — this repository is a community fork of [**DeusData/codebase-memory-mcp**](https://github.com/DeusData/codebase-memory-mcp) (MIT License, © 2025 DeusData). It tracks upstream and adds the following agent-native enhancements ahead of / alongside upstream:
+>
+> - **Agent-native enhancements (this fork)** — a new **`explore`** MCP tool: *one* call returns the blast-radius (attributed callers + inline fan-in hotspot flags), **nearby neighbors** (1-hop callees + same-file siblings, so it covers the surrounding area), **and** the verbatim line-numbered source of the matched symbols grouped by file, with a `query_graph`/Cypher escape-hatch — built for AI agents to read like a `Read`. Plus **idiomatic Swift type kinds** — `struct`/`enum`/`actor` are distinct graph labels (`Struct`/`Enum`/`Actor`) instead of all being lumped as `Class`, and Swift **enum cases** are extracted as distinct `EnumCase` nodes (including multi-name `case a, b, c` lines) — and a Swift **enum-static dedup** regression pin (an `enum`'s `static func`s are never double-emitted as both a Method and a Function node).
+> - **Cypher aggregation** — a non-aggregate function mixed with an aggregate (e.g. `RETURN type(r), count(*)`) groups by the function value (one row per edge type) instead of collapsing every row into a single group (upstream fix, regression-pinned here).
+> - **`detect_changes` blast radius** — the transitive caller impact set with per-symbol `hop`, plus the effective (clamped) `depth` echoed in every response (this fork).
+>
+> All credit for the original engine belongs to DeusData. License unchanged — see [LICENSE](LICENSE).
+
+### 🛠️ Build this fork from source
+
+This fork ships **no prebuilt release binaries** — build the integrated binary yourself. Pure C, Apple clang / gcc, zero external runtime dependencies:
+
+```bash
+git clone https://github.com/21307369/codebase-memory-mcp-pro.git
+cd codebase-memory-mcp-pro
+./scripts/build.sh          # → build/c/codebase-memory-mcp
+```
+
+The first build compiles all vendored tree-sitter grammars (a few minutes); for iterative rebuilds `make -j -f Makefile.cbm cbm` is much faster.
+
 **The fastest and most efficient code intelligence engine for AI coding agents.** Full-indexes an average repository in milliseconds, the Linux kernel (28M LOC, 75K files) in 3 minutes. Answers structural queries in under 1ms. Ships as a single static binary for macOS, Linux, and Windows — download, run `install`, done.
 
 High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 158 languages, enhanced with [**Hybrid LSP** semantic type resolution](#hybrid-lsp) for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, Rust, and Perl — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 15 MCP tools. Zero dependencies. Plug and play across 43 supported automatic/conditional client surfaces.
