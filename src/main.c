@@ -270,6 +270,16 @@ static int run_cli(int argc, char **argv) {
         }
         return SKIP_ONE;
     }
+    /* Mirror stdio mode: wire the runtime config store so policy-aware
+     * handlers (index limits) see configured values, not defaults. */
+    cbm_config_t *cli_config = NULL;
+    const char *cli_home = cbm_get_home_dir();
+    if (cli_home) {
+        char config_dir[CBM_SZ_1K];
+        snprintf(config_dir, sizeof(config_dir), "%s", cbm_resolve_cache_dir());
+        cli_config = cbm_config_open(config_dir);
+    }
+    cbm_mcp_server_set_config(srv, cli_config);
 
     char *result = cbm_mcp_handle_tool(srv, tool_name, args_json);
     int exit_code = 0;
@@ -284,6 +294,9 @@ static int run_cli(int argc, char **argv) {
     }
 
     cbm_mcp_server_free(srv);
+    if (cli_config) {
+        cbm_config_close(cli_config);
+    }
     if (progress) {
         cbm_progress_sink_fini();
     }
