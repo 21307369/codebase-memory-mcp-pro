@@ -164,6 +164,7 @@ extern const TSLanguage *tree_sitter_apex(void);
 extern const TSLanguage *tree_sitter_soql(void);
 extern const TSLanguage *tree_sitter_sosl(void);
 extern const TSLanguage *tree_sitter_pine(void);
+extern const TSLanguage *tree_sitter_objectscript_udl(void);
 
 // -- Empty sentinel --
 static const char *empty_types[] = {NULL};
@@ -1575,6 +1576,21 @@ static const char *pine_var_types[] = {"variable_definition_statement",
 static const char *pine_branch_types[] = {"if_statement",     "switch_statement", "for_statement",
                                           "for_in_statement", "while_statement",  NULL};
 static const char *pine_assign_types[] = {"reassignment_statement", NULL};
+
+// ==================== OBJECTSCRIPT UDL ====================
+// InterSystems ObjectScript. Node names verified against
+// intersystems/tree-sitter-objectscript grammar.
+static const char *objectscript_udl_func_types[] = {"method", "classmethod", "query", NULL};
+static const char *objectscript_udl_class_types[] = {"class_definition", NULL};
+static const char *objectscript_udl_field_types[] = {
+    "property", "parameter", "index", "trigger", "xdata", "storage", "foreignkey", NULL};
+static const char *objectscript_udl_call_types[] = {"class_method_call", "method_call",
+                                                    "relative_dot_method", "macro", NULL};
+static const char *objectscript_udl_module_types[] = {"source_file", NULL};
+/* Branching nodes for cyclomatic complexity (verified against grammar node-types) */
+static const char *objectscript_udl_branch_types[] = {
+    "command_if", "command_for", "command_while", "elseif_block", "catch_block", NULL};
+
 // ==================== SPEC TABLE ====================
 
 static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
@@ -2520,6 +2536,15 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                        pine_module_types, pine_call_types, empty_types, empty_types,
                        pine_branch_types, pine_var_types, pine_assign_types, empty_types, NULL,
                        empty_types, NULL, NULL, tree_sitter_pine, NULL, NULL},
+
+    // CBM_LANG_OBJECTSCRIPT_UDL — InterSystems ObjectScript class (.cls) UDL.
+    // intersystems/tree-sitter-objectscript.
+    [CBM_LANG_OBJECTSCRIPT_UDL] = {CBM_LANG_OBJECTSCRIPT_UDL, objectscript_udl_func_types,
+                                   objectscript_udl_class_types, objectscript_udl_field_types,
+                                   objectscript_udl_module_types, objectscript_udl_call_types,
+                                   empty_types, empty_types, objectscript_udl_branch_types,
+                                   empty_types, empty_types, empty_types, NULL, empty_types, NULL,
+                                   NULL, tree_sitter_objectscript_udl, NULL, NULL},
 
 };
 

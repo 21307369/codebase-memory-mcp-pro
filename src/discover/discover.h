@@ -59,6 +59,11 @@ CBMLanguage cbm_language_from_shebang(const char *path);
  * On read failure, defaults to CBM_LANG_CFSCRIPT. */
 CBMLanguage cbm_disambiguate_cfc(const char *path);
 
+/* Disambiguate .cls files by reading first 4KB of content.
+ * Returns CBM_LANG_OBJECTSCRIPT_UDL if a line starts with "Class <Uppercase>",
+ * otherwise CBM_LANG_APEX. On read failure, defaults to CBM_LANG_APEX. */
+CBMLanguage cbm_disambiguate_cls(const char *path);
+
 /* ── Gitignore pattern matching ──────────────────────────────────── */
 
 typedef struct cbm_gitignore cbm_gitignore_t;

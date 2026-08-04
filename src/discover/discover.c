@@ -397,6 +397,10 @@ static CBMLanguage detect_file_language(const char *entry_name, const char *abs_
     if (dot && strcmp(dot, ".m") == 0) {
         lang = cbm_disambiguate_m(abs_path);
     }
+    /* Special: .cls is shared by ObjectScript UDL and Apex */
+    if (dot && strcmp(dot, ".cls") == 0) {
+        lang = cbm_disambiguate_cls(abs_path);
+    }
     /* Check ignored JSON files */
     if (lang == CBM_LANG_JSON && str_in_list(entry_name, IGNORED_JSON_FILES)) {
         return CBM_LANG_COUNT;

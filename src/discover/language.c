@@ -838,6 +838,7 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_APEX] = "Apex",
     [CBM_LANG_SOQL] = "SOQL",
     [CBM_LANG_SOSL] = "SOSL",
+    [CBM_LANG_OBJECTSCRIPT_UDL] = "ObjectScript UDL",
 
 };
 
@@ -1253,4 +1254,37 @@ CBMLanguage cbm_disambiguate_cfc(const char *path) {
         return starts_with_ci(p, "<cfscript") ? CBM_LANG_CFSCRIPT : CBM_LANG_CFML;
     }
     return CBM_LANG_CFSCRIPT;
+}
+
+/* Disambiguate .cls files: shared by InterSystems ObjectScript UDL and
+ * Salesforce Apex. ObjectScript class files begin with a line of the form
+ * "Class <UppercasePackage>...". Defaults to Apex on any doubt. */
+CBMLanguage cbm_disambiguate_cls(const char *path) {
+    if (!path) {
+        return CBM_LANG_APEX;
+    }
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return CBM_LANG_APEX;
+    }
+
+    char buf[CBM_SZ_4K + SKIP_ONE];
+    size_t n = fread(buf, SKIP_ONE, CBM_SZ_4K, f);
+    buf[n] = '\0';
+    (void)fclose(f);
+
+    const char *line = buf;
+    while (*line) {
+        if (strncmp(line, "Class ", SLEN("Class ")) == 0 &&
+            isupper((unsigned char)line[SLEN("Class ")])) {
+            return CBM_LANG_OBJECTSCRIPT_UDL;
+        }
+        const char *nl = strchr(line, '\n');
+        if (!nl) {
+            break;
+        }
+        line = nl + SKIP_ONE;
+    }
+    return CBM_LANG_APEX;
 }
