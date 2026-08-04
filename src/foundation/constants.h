@@ -105,7 +105,7 @@ enum { SKIP_ONE = 1, PAIR_LEN = 2 };
  * Use these instead of inlining a label list. tests/test_store_nodes.c pins
  * them against cbm_label_is_type_like(), so adding a type-like label there
  * without updating these fails CI rather than quietly shrinking query results. */
-#define CBM_SQL_TYPE_LIKE_LABELS "'Class','Struct','Interface','Enum','Type','Trait'"
+#define CBM_SQL_TYPE_LIKE_LABELS "'Class','Struct','Interface','Enum','Type','Trait','Actor'"
 #define CBM_SQL_CALLABLE_LABELS "'Function','Method'"
 #define CBM_SQL_CALLABLE_OR_TYPE_LABELS CBM_SQL_CALLABLE_LABELS "," CBM_SQL_TYPE_LIKE_LABELS
 

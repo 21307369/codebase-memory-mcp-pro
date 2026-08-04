@@ -28,7 +28,7 @@
 TEST(sql_label_allowlists_match_cbm_label_is_type_like) {
     /* Every label the C predicate accepts must appear in the SQL fragment. */
     static const char *const type_like[] = {"Class", "Struct", "Interface",
-                                            "Enum",  "Type",   "Trait"};
+                                            "Enum",  "Type",   "Trait", "Actor"};
     for (size_t i = 0; i < sizeof(type_like) / sizeof(type_like[0]); i++) {
         ASSERT_TRUE(cbm_label_is_type_like(type_like[i]));
         char quoted[64];

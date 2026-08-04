@@ -4316,16 +4316,36 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
         }
     }
     // Swift: tree-sitter-swift does NOT have a dedicated `struct_declaration`
-    // node — `struct`, `class` and `actor` all parse to `class_declaration`,
-    // distinguished only by the `declaration_kind` field (the leading keyword
-    // token). Read that field and emit "Struct" when the keyword is `struct`
-    // (and "Class" for `class`/`actor`, which class_label_for_kind already gives).
+    // node — `struct`, `class`, `enum` and `actor` all parse to
+    // `class_declaration`, distinguished only by the `declaration_kind` field
+    // (the leading keyword token). Relabel to the idiomatic kind (struct→Struct,
+    // enum→Enum, actor→Actor; class stays Class, protocol is already Interface)
+    // so the graph distinguishes Swift type kinds. Type-like consumers route
+    // through cbm_label_is_type_like() / CBM_SQL_TYPE_LIKE_LABELS, so Enum/Actor
+    // resolve like other type containers.
     if (ctx->language == CBM_LANG_SWIFT && strcmp(kind, "class_declaration") == 0) {
         TSNode dk = ts_node_child_by_field_name(node, TS_FIELD("declaration_kind"));
         if (!ts_node_is_null(dk)) {
             char *dk_text = cbm_node_text(a, dk, ctx->source);
             if (dk_text && strcmp(dk_text, "struct") == 0) {
                 label = "Struct";
+            } else if (dk_text && strcmp(dk_text, "enum") == 0) {
+                label = "Enum";
+            } else if (dk_text && strcmp(dk_text, "actor") == 0) {
+                label = "Actor";
+            } else if (dk_text && strcmp(dk_text, "extension") == 0) {
+                /* An `extension` parses as class_declaration whose `name` is the
+                 * EXTENDED type, sharing that type's FQN. Pushing a type def here
+                 * would CLOBBER the real type's label via the UNIQUE(project,
+                 * qualified_name) last-write-wins upsert (`struct X{}` then
+                 * `extension X:P{}` → X relabeled back to Class) and phantom-node
+                 * a type defined elsewhere (stdlib Date/Color/View). Extract its
+                 * members — they attach to the extended type's QN — but emit NO
+                 * type def for the extension itself. */
+                extract_class_methods(ctx, node, class_qn, spec);
+                extract_class_fields(ctx, node, class_qn, spec);
+                extract_class_variables(ctx, node, class_qn, spec);
+                return;
             }
         }
     }
