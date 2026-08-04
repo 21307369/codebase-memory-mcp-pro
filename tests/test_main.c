@@ -147,6 +147,7 @@ int main(void) {
     RUN_SUITE(graph_buffer);
 
     /* Pipeline (M8) */
+    RUN_SUITE(pipeline);
 
 
     /* Watcher (M10) */
