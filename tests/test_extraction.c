@@ -1498,6 +1498,28 @@ TEST(swift_extension_does_not_clobber_type_label) {
     PASS();
 }
 
+/* Swift enum cases are extracted as distinct "EnumCase" nodes (previously
+ * dropped entirely — enum_entry was not a recognized member kind). A
+ * multi-name line (`case east, west`) splits into one EnumCase per case
+ * identifier. */
+TEST(swift_enum_cases_extracted_as_enumcase) {
+    CBMFileResult *r = extract("enum Direction {\n"
+                               "    case north\n"
+                               "    case east, west\n"
+                               "}\n",
+                               CBM_LANG_SWIFT, "t", "Enum.swift");
+    ASSERT_NOT_NULL(r);
+    /* north + east + west = 3 distinct EnumCase nodes (multi-name split). */
+    ASSERT_EQ(count_defs_with_label(r, "EnumCase"), 3);
+    ASSERT(has_def(r, "EnumCase", "north"));
+    ASSERT(has_def(r, "EnumCase", "east"));
+    ASSERT(has_def(r, "EnumCase", "west"));
+    /* The enum type itself stays a distinct Enum node (cases are not the type). */
+    ASSERT(has_def(r, "Enum", "Direction"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Swift calls (port of PR #47 Go tests) --- */
 TEST(swift_simple_call) {
     CBMFileResult *r = extract("func main() { greet() }\nfunc greet() { print(\"hello\") }\n",
@@ -5351,6 +5373,7 @@ SUITE(extraction) {
     RUN_TEST(swift_struct);
     RUN_TEST(swift_idiomatic_type_kinds);
     RUN_TEST(swift_extension_does_not_clobber_type_label);
+    RUN_TEST(swift_enum_cases_extracted_as_enumcase);
     RUN_TEST(swift_simple_call);
     RUN_TEST(swift_method_call);
     RUN_TEST(swift_constructor_call);
