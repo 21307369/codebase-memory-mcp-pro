@@ -5,6 +5,7 @@
  * Suite: suite_worker_pool  — Parallel-for correctness + concurrency validation
  */
 #include "test_framework.h"
+#include "foundation/compat_thread.h"
 #include "foundation/platform.h"
 #include "pipeline/worker_pool.h"
 
@@ -12,6 +13,42 @@
 #include <string.h>
 
 /* ── System Info Tests ────────────────────────────────────────────── */
+
+typedef struct {
+    cbm_system_info_t *infos;
+    int idx;
+} system_info_parallel_ctx_t;
+
+static void *system_info_parallel_worker(void *arg) {
+    system_info_parallel_ctx_t *ctx = arg;
+    ctx->infos[ctx->idx] = cbm_system_info();
+    return NULL;
+}
+
+TEST(system_info_parallel_first_call_consistent) {
+    enum { SYSINFO_PARALLEL_WORKERS = 4 };
+    cbm_system_info_t infos[SYSINFO_PARALLEL_WORKERS];
+    memset(infos, 0, sizeof(infos));
+    cbm_thread_t tids[SYSINFO_PARALLEL_WORKERS];
+    system_info_parallel_ctx_t ctxs[SYSINFO_PARALLEL_WORKERS];
+
+    for (int i = 0; i < SYSINFO_PARALLEL_WORKERS; i++) {
+        ctxs[i].infos = infos;
+        ctxs[i].idx = i;
+        ASSERT_EQ(cbm_thread_create(&tids[i], 0, system_info_parallel_worker, &ctxs[i]), 0);
+    }
+    for (int i = 0; i < SYSINFO_PARALLEL_WORKERS; i++) {
+        cbm_thread_join(&tids[i]);
+    }
+
+    ASSERT_GT(infos[0].total_cores, 0);
+    for (int i = 1; i < SYSINFO_PARALLEL_WORKERS; i++) {
+        ASSERT_EQ(infos[i].total_cores, infos[0].total_cores);
+        ASSERT_EQ(infos[i].perf_cores, infos[0].perf_cores);
+        ASSERT_EQ(infos[i].total_ram, infos[0].total_ram);
+    }
+    PASS();
+}
 
 TEST(system_info_total_cores) {
     cbm_system_info_t info = cbm_system_info();
@@ -368,6 +405,7 @@ TEST(parallel_for_serial_matches_parallel) {
 /* ── Suite Registration ──────────────────────────────────────────── */
 
 SUITE(system_info) {
+    RUN_TEST(system_info_parallel_first_call_consistent);
     RUN_TEST(system_info_total_cores);
     RUN_TEST(system_info_total_cores_sane);
     RUN_TEST(system_info_perf_cores);
