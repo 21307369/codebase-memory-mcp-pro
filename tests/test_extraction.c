@@ -1465,6 +1465,33 @@ TEST(swift_struct) {
     PASS();
 }
 
+/* Regression (dup-node): a `static func` inside a Swift `enum` namespace must
+ * be emitted exactly ONCE as a Method — not ALSO as a top-level Function. The
+ * enum body node type is `enum_class_body`; if the walk's body-container list
+ * drifts from extract_class_def's, enum members get re-walked and
+ * double-extracted into spurious Function nodes. */
+TEST(swift_enum_static_func_not_duplicated) {
+    CBMFileResult *r = extract("enum SM2 {\n    static func review(q: Int) -> Int { return q }\n}\n",
+                               CBM_LANG_SWIFT, "t", "SM2.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int method = 0, func = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (strcmp(r->defs.items[i].name, "review") != 0) {
+            continue;
+        }
+        if (strcmp(r->defs.items[i].label, "Method") == 0) {
+            method++;
+        } else if (strcmp(r->defs.items[i].label, "Function") == 0) {
+            func++;
+        }
+    }
+    ASSERT(method == 1); /* emitted once, as a Method */
+    ASSERT(func == 0);   /* NOT also as a Function (the dup-node bug) */
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Swift type declarations get idiomatic labels via the tree-sitter
  * `declaration_kind` field: struct→Struct, enum→Enum, actor→Actor; class
  * stays Class. */
@@ -5371,6 +5398,7 @@ SUITE(extraction) {
 
     /* OOP/Systems variants */
     RUN_TEST(swift_struct);
+    RUN_TEST(swift_enum_static_func_not_duplicated);
     RUN_TEST(swift_idiomatic_type_kinds);
     RUN_TEST(swift_extension_does_not_clobber_type_label);
     RUN_TEST(swift_enum_cases_extracted_as_enumcase);
