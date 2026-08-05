@@ -44,3 +44,19 @@ Head-to-head on `grade`: cbm matches codegraph's one-call source+blast-radius, b
 Agent-use composite (subjective, fairness-checked): cbm-pro ~75 → **~85** vs codegraph 79 — surpass achieved via WS1+WS2a, because cbm retains its query(9)/architecture(9) dominance once explore reaches parity.
 
 Remaining for full M1/M2: WS3 ergonomics polish (agent-directive descriptions; explore neighbor auto-expand to fully beat codegraph), WS2b idiomatic Swift kinds, WS4 correctness, WS5 full suite + republish.
+
+## 2026-08-05 — new-repo parity run (vorssaint-utils, 333 src files)
+
+New repo (upstream base + ports) vs old fork binary, same harness:
+
+| metric | new | old fork |
+|---|---|---|
+| nodes | 21566 | 21573 |
+| edges | 118552 | 90341 (upstream edge model is richer) |
+| dup_nodes (Method+Function same name+file) | 20 | 20 |
+| kinds | 18 | 18 |
+| Swift kind dist | Struct:470 EnumCase:971 … | identical |
+
+dup_nodes=20 on BOTH: the enum-static bug is fixed in both (the residual 20
+are a different duplication class, unchanged by the port — no regression).
+Harness note: qcbm now passes `format:"json"` (new CLI defaults to tree).

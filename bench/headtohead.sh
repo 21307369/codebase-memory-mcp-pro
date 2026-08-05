@@ -19,7 +19,7 @@ CBM_OUT=$(CBM_CACHE_DIR="$CACHE" "$CBM" cli index_repository "{\"repo_path\":\"$
 PROJ=$(echo "$CBM_OUT" | sed -n 's/.*"project":"\([^"]*\)".*/\1/p')
 CBM_N=$(echo "$CBM_OUT" | sed -n 's/.*"nodes":\([0-9]*\).*/\1/p')
 CBM_E=$(echo "$CBM_OUT" | sed -n 's/.*"edges":\([0-9]*\).*/\1/p')
-qcbm(){ CBM_CACHE_DIR="$CACHE" "$CBM" cli query_graph "{\"project\":\"$PROJ\",\"query\":\"$1\"}" 2>/dev/null | grep -v '^level='; }
+qcbm(){ CBM_CACHE_DIR="$CACHE" "$CBM" cli query_graph "{\"project\":\"$PROJ\",\"format\":\"json\",\"query\":\"$1\"}" 2>/dev/null | grep -v '^level='; }
 
 # cbm dup-node + kind richness: dup keyed on (name,file) since the bug emits the
 # same source symbol as Method+Function with DIFFERENT qualified_names.
