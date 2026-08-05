@@ -491,7 +491,10 @@ TEST(subprocess_quiet_timeout_kills_ignoring_tree) {
 
     pid_t parent_pid = -1;
     pid_t grandchild_pid = -1;
-    bool ready = wait_for_tree_pids(pid_path, process, &parent_pid, &grandchild_pid, 500);
+    /* Generous ready window: it bounds SETUP only (two /bin/sh execs writing the
+     * pid file), which stalls past 500 ms on loaded CI boxes; the quiet-timeout
+     * behavior under test runs on its own clock from spawn. */
+    bool ready = wait_for_tree_pids(pid_path, process, &parent_pid, &grandchild_pid, 10000);
     cbm_proc_result_t result;
     bool terminal = ready && poll_until_terminal(process, 3000, &result);
     bool parent_gone = terminal && wait_pid_gone(parent_pid, 1000);
