@@ -682,6 +682,40 @@ TEST(cli_activation_refusal_note_reaches_diagnostic_issue1416) {
     PASS();
 }
 
+/* #1537: a reservation that FAILED (lock I/O, leftover coordination state,
+ * permissions) is not a reservation that was BUSY. Reporting both as "active
+ * CBM sessions could not be stopped" sent a reporter hunting processes that a
+ * reboot proved did not exist — and the remedy we printed told them to run a
+ * cbm binary they had just uninstalled. Each condition now names itself. */
+TEST(cli_activation_distinguishes_busy_from_reservation_failure_issue1537) {
+    cbm_activation_transaction_note_refusal_for_testing(NULL, 0UL);
+
+    /* BUSY (0): real sessions hold the cohort — closing something is the fix. */
+    cli_activation_fake_t busy = {
+        .participants_active = true,
+        .mutation_reserve_result = 0,
+    };
+    cbm_cli_activation_ops_t ops = {
+        .context = &busy,
+        .reserve_for_mutation = cli_activation_fake_reserve_mutation,
+        .mutation_lease_release = cli_activation_fake_release_mutation,
+        .visible_diagnostic = cli_activation_fake_diagnostic,
+    };
+    ASSERT_EQ(cbm_cli_activation_guard_with_ops(&ops, cli_activation_fake_mutation, &busy), 1);
+    ASSERT_NOT_NULL(strstr(busy.diagnostic, "could not be stopped safely"));
+
+    /* FAILURE (-1): nothing is running, so the reader must not be told to close
+     * sessions — and must not be handed a command that may not be installed. */
+    cli_activation_fake_t failed = {
+        .mutation_reserve_result = -1,
+    };
+    ops.context = &failed;
+    ASSERT_EQ(cbm_cli_activation_guard_with_ops(&ops, cli_activation_fake_mutation, &failed), 1);
+    ASSERT_NOT_NULL(strstr(failed.diagnostic, "NOT a running-session problem"));
+    ASSERT_NULL(strstr(failed.diagnostic, "could not be stopped safely"));
+    PASS();
+}
+
 TEST(cli_activation_refuses_unsafe_cohort_reservation) {
     cli_activation_fake_t fake = {
         .mutation_reserve_result = -1,
@@ -1383,8 +1417,8 @@ TEST(cli_update_download_failure_does_not_quiesce_sessions) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--standard", "--yes"};
-    int rc = cli_test_cmd_update(3, argv);
+    char *argv[] = {"--force", "--yes"};
+    int rc = cli_test_cmd_update(2, argv);
     cbm_cli_set_activation_ops_for_test(NULL);
     cbm_set_auto_answer_for_test(0);
 
@@ -1444,7 +1478,7 @@ TEST(cli_update_already_current_does_not_quiesce_sessions) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--standard"};
+    char *argv[] = {"--yes"};
     int rc = fixture_ready ? cli_test_cmd_update(1, argv) : -1;
     cbm_cli_set_activation_ops_for_test(NULL);
 
@@ -1576,8 +1610,8 @@ TEST(cli_update_agent_configs_finish_before_guard_release) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--standard"};
-    int rc = cli_test_cmd_update(2, argv);
+    char *argv[] = {"--force"};
+    int rc = cli_test_cmd_update(1, argv);
     cbm_cli_set_activation_ops_for_test(NULL);
 
     /* Re-run against a known old target while one independently detected agent
@@ -1599,7 +1633,7 @@ TEST(cli_update_agent_configs_finish_before_guard_release) {
     };
     cbm_cli_activation_ops_t failure_ops = cli_activation_fake_ops(&config_failure);
     cbm_cli_set_activation_ops_for_test(&failure_ops);
-    int config_failure_rc = cli_test_cmd_update(2, argv);
+    int config_failure_rc = cli_test_cmd_update(1, argv);
     cbm_cli_set_activation_ops_for_test(NULL);
     struct stat updated_status;
     bool replacement_kept = stat(bin_target, &updated_status) == 0 &&
@@ -1767,11 +1801,11 @@ TEST(cli_activation_guard_is_bypassed_for_dry_run_and_plan) {
     cbm_cli_set_activation_ops_for_test(&ops);
     char *install_dry[] = {"--force", "--dry-run"};
     char *install_plan[] = {"--force", "--plan"};
-    char *update_dry[] = {"--force", "--dry-run", "--standard"};
+    char *update_dry[] = {"--force", "--dry-run"};
     char *uninstall_dry[] = {"--dry-run", "--yes"};
     int install_dry_rc = cli_test_cmd_install(2, install_dry);
     int install_plan_rc = cli_test_cmd_install(2, install_plan);
-    int update_dry_rc = cli_test_cmd_update(3, update_dry);
+    int update_dry_rc = cli_test_cmd_update(2, update_dry);
     int uninstall_dry_rc = cli_test_cmd_uninstall(2, uninstall_dry);
     cbm_cli_set_activation_ops_for_test(NULL);
     cbm_set_auto_answer_for_test(0);
@@ -4706,6 +4740,32 @@ TEST(cli_agent_reinstall_preserves_foreign_policy_entries) {
     PASS();
 }
 
+/* Regression for #1388: a hook client blocked by a daemon BUILD CONFLICT must
+ * emit a stdout systemMessage. stdout is the only channel a hook caller sees,
+ * so the pre-fix stderr-only reporting was indistinguishable from "no matches"
+ * and produced silent skips for the whole session. The absent-daemon notice
+ * must stay distinct: it points at `daemon start`, which cannot heal a build
+ * conflict. Non-Claude dialects take no bare stdout JSON at all. */
+TEST(cli_hook_conflict_emits_stdout_notice_issue1388) {
+    const char *conflict = cbm_hook_admission_notice(CBM_HOOK_ADMISSION_BUILD_CONFLICT, NULL);
+    ASSERT_NOT_NULL(conflict);
+    ASSERT_NOT_NULL(strstr(conflict, "systemMessage"));
+    ASSERT_NOT_NULL(strstr(conflict, "different build"));
+    /* The actionable step: a conflicted daemon must be STOPPED, not started. */
+    ASSERT_NOT_NULL(strstr(conflict, "daemon stop"));
+
+    const char *absent = cbm_hook_admission_notice(CBM_HOOK_ADMISSION_DAEMON_ABSENT, NULL);
+    ASSERT_NOT_NULL(absent);
+    ASSERT_NOT_NULL(strstr(absent, "daemon start"));
+    /* Distinct diagnoses: the conflict notice must never claim no daemon runs. */
+    ASSERT_TRUE(strcmp(conflict, absent) != 0);
+    ASSERT_NULL(strstr(conflict, "no CBM daemon is running"));
+
+    /* Other dialects do not consume a bare stdout JSON object. */
+    ASSERT_NULL(cbm_hook_admission_notice(CBM_HOOK_ADMISSION_BUILD_CONFLICT, "codex"));
+    ASSERT_NULL(cbm_hook_admission_notice(CBM_HOOK_ADMISSION_DAEMON_ABSENT, "codex"));
+    PASS();
+}
 #ifndef _WIN32
 /* Regression for #1387: installing over an existing setup whose hook scripts
  * are not byte-owned (manual install with a custom binary location, or a
@@ -5925,6 +5985,80 @@ TEST(cli_detected_agent_summary_includes_registry_clients) {
     test_rmdir_r(tmpdir);
     if (!redirected || install_rc != 0 || !summary_ok)
         FAIL("detected-agent summary must include stable registry clients");
+    PASS();
+}
+#endif
+
+#ifndef _WIN32
+/* Regression for #1387 (second half): `install --dry-run` printed all three
+ * hook groups as if they would install, even when the on-disk hook script is
+ * NOT ours and the real run would refuse to rewrite it. The dry run is exactly
+ * where that has to be visible - the reporter could not see the loss coming. */
+TEST(cli_dry_run_predicts_refused_hook_script_issue1387) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-dryrun-refusal-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char hooks_dir[512];
+    snprintf(hooks_dir, sizeof(hooks_dir), "%s/.claude/hooks", tmpdir);
+    if (!cbm_mkdir_p(hooks_dir, 0755))
+        FAIL("mkdir hooks_dir failed");
+    /* A gate script that is NOT ours: a manual install pointing at another
+     * binary. The real install refuses to rewrite it (TEXT_UNOWNED). */
+    char gate_path[768];
+    snprintf(gate_path, sizeof(gate_path), "%s/cbm-code-discovery-gate", hooks_dir);
+    write_test_file(gate_path, "#!/usr/bin/env bash\n"
+                               "# codebase-memory-mcp search augmenter (Claude Code PreToolUse).\n"
+                               "BIN=\"/opt/tools/cbm/codebase-memory-mcp\"\n"
+                               "exec 0\n");
+
+    const char *const env_names[] = {"HOME", "PATH", "CLAUDE_CONFIG_DIR"};
+    char *saved[sizeof(env_names) / sizeof(env_names[0])];
+    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
+        saved[i] = save_test_env(env_names[i]);
+        cbm_unsetenv(env_names[i]);
+    }
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("PATH", tmpdir, 1);
+
+    FILE *capture = tmpfile();
+    int saved_stdout = capture ? dup(STDOUT_FILENO) : -1;
+    bool redirected = false;
+    if (capture && saved_stdout >= 0) {
+        fflush(stdout);
+        redirected = dup2(fileno(capture), STDOUT_FILENO) >= 0;
+    }
+    if (redirected) {
+        (void)cbm_install_agent_configs(tmpdir, "/opt/other/codebase-memory-mcp", false, true);
+        fflush(stdout);
+        (void)dup2(saved_stdout, STDOUT_FILENO);
+    }
+    if (saved_stdout >= 0) {
+        close(saved_stdout);
+    }
+    char output[16384] = {0};
+    if (capture) {
+        rewind(capture);
+        size_t count = fread(output, 1, sizeof(output) - 1U, capture);
+        output[count] = '\0';
+        fclose(capture);
+    }
+
+    /* The dry run must WARN about the script it cannot rewrite, and must not
+     * claim the search-augmentation hook group as installable. */
+    bool warned = strstr(output, "cbm-code-discovery-gate") != NULL &&
+                  (strstr(output, "not ours") != NULL ||
+                   strstr(output, "would be skipped") != NULL || strstr(output, "refuse") != NULL);
+
+    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
+        restore_test_env(env_names[i], saved[i]);
+    }
+    test_rmdir_r(tmpdir);
+    if (!redirected)
+        FAIL("stdout capture failed");
+    if (!warned)
+        FAIL("dry-run must predict a refused hook-script rewrite (#1387)");
     PASS();
 }
 #endif
@@ -9988,6 +10122,11 @@ TEST(cli_upsert_codex_mcp_fresh) {
     ASSERT_NOT_NULL(data);
     ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") != NULL);
     ASSERT(strstr(data, "/usr/local/bin/codebase-memory-mcp") != NULL);
+    /* #1562: Codex passes only the names listed in env_vars into a stdio MCP
+     * subprocess. Without CBM_CACHE_DIR the spawned server uses the DEFAULT
+     * cache while the daemon uses the configured one, the two disagree, and the
+     * handshake closes — Codex then shows no cbm tools at all. */
+    ASSERT(strstr(data, "env_vars = [\"CBM_CACHE_DIR\"]") != NULL);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -11360,6 +11499,98 @@ TEST(cli_config_get_set) {
     PASS();
 }
 
+/* Capture stdout across one cbm_cmd_config invocation. Returns the command's
+ * rc and copies captured stdout (NUL-terminated, truncated to cap) out.
+ * tmpfile+dup2+rewind is the file's established portable capture idiom —
+ * pread/mkstemp/setenv do not exist on the MinGW leg. */
+static int cli_config_cmd_capture(int argc, char **argv, char *out, size_t cap) {
+    out[0] = '\0';
+    FILE *capture = tmpfile();
+    int saved = capture ? dup(fileno(stdout)) : -1;
+    if (!capture || saved < 0) {
+        if (capture)
+            fclose(capture);
+        if (saved >= 0)
+            close(saved);
+        return -1000;
+    }
+    fflush(stdout);
+    if (dup2(fileno(capture), fileno(stdout)) < 0) {
+        fclose(capture);
+        close(saved);
+        return -1000;
+    }
+    int rc = cbm_cmd_config(argc, argv);
+    fflush(stdout);
+    (void)dup2(saved, fileno(stdout));
+    close(saved);
+    rewind(capture);
+    size_t got = fread(out, 1, cap - 1, capture);
+    out[got] = '\0';
+    fclose(capture);
+    return rc;
+}
+
+/* The user-facing config contract (#1522 bug 2): `get` of an UNSET key prints
+ * that key's real default — the same fallback the runtime readers use — with
+ * exit 0; a stored value round-trips; an unknown key is an ERROR (non-zero,
+ * nothing on stdout) for get, set, and reset alike. The old code printed ""
+ * with exit 0 for every unset key AND every typo, so a misspelled key was
+ * indistinguishable from a correctly-read setting. */
+TEST(cli_config_cmd_get_prints_defaults_and_rejects_unknown_keys) {
+    char tmpdir[512];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-cfg-cmd-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char *saved_cache = NULL;
+    const char *prior = getenv("CBM_CACHE_DIR");
+    if (prior) {
+        saved_cache = strdup(prior);
+    }
+    cbm_setenv("CBM_CACHE_DIR", tmpdir, 1);
+
+    char out[512];
+    /* Unset key -> its real default, exit 0. */
+    char *get_watch[] = {"get", "auto_watch"};
+    ASSERT_EQ(cli_config_cmd_capture(2, get_watch, out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "true\n");
+    char *get_limit[] = {"get", "auto_index_limit"};
+    ASSERT_EQ(cli_config_cmd_capture(2, get_limit, out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "50000\n");
+
+    /* Stored value round-trips. */
+    char *set_watch[] = {"set", "auto_watch", "false"};
+    ASSERT_EQ(cli_config_cmd_capture(3, set_watch, out, sizeof(out)), 0);
+    ASSERT_EQ(cli_config_cmd_capture(2, get_watch, out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "false\n");
+
+    /* Reset returns the key to its default. */
+    char *reset_watch[] = {"reset", "auto_watch"};
+    ASSERT_EQ(cli_config_cmd_capture(2, reset_watch, out, sizeof(out)), 0);
+    ASSERT_EQ(cli_config_cmd_capture(2, get_watch, out, sizeof(out)), 0);
+    ASSERT_STR_EQ(out, "true\n");
+
+    /* Unknown keys are errors on every subcommand, with clean stdout. */
+    char *get_bogus[] = {"get", "totally_bogus_key"};
+    ASSERT_TRUE(cli_config_cmd_capture(2, get_bogus, out, sizeof(out)) != 0);
+    ASSERT_STR_EQ(out, "");
+    char *set_bogus[] = {"set", "totally_bogus_key", "x"};
+    ASSERT_TRUE(cli_config_cmd_capture(3, set_bogus, out, sizeof(out)) != 0);
+    ASSERT_STR_EQ(out, "");
+    char *reset_bogus[] = {"reset", "totally_bogus_key"};
+    ASSERT_TRUE(cli_config_cmd_capture(2, reset_bogus, out, sizeof(out)) != 0);
+    ASSERT_STR_EQ(out, "");
+
+    if (saved_cache) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 typedef struct {
     cbm_config_t *config;
     const char *key;
@@ -11869,6 +12100,77 @@ TEST(cli_sha256_file_matches_known_vector) {
     PASS();
 }
 
+/* #1544: v0.10.2 deleted the ui/standard chooser AND the flags that drove it,
+ * so `update --ui` — a command people had in scripts and aliases — started
+ * failing with "unknown update option". Retiring a choice is fine; breaking the
+ * words people already type is not. Both flags must be accepted, do nothing,
+ * and say so once. A genuinely unknown flag must still be rejected, or this
+ * degenerates into ignoring typos. */
+/* #1554: the skill's `description` contained "Triggers on: " — a colon-space,
+ * which YAML reads as a nested-mapping indicator inside an UNQUOTED scalar.
+ * Strict readers (js-yaml's load, the frontmatter parser in `npx skills`)
+ * reject the whole document, so the installed skill silently fails to load.
+ *
+ * The rule is checked for EVERY skill, not just the one that broke: any
+ * frontmatter scalar whose value contains ": " must be quoted. Pinning only
+ * the current text would let the next added skill reintroduce it. */
+TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554) {
+    const cbm_skill_t *sk = cbm_get_skills();
+    ASSERT_NOT_NULL(sk);
+    for (int i = 0; i < CBM_SKILL_COUNT; i++) {
+        const char *body = sk[i].content;
+        ASSERT_NOT_NULL(body);
+        /* Frontmatter is the block between the first two "---" lines. */
+        ASSERT_TRUE(strncmp(body, "---\n", 4) == 0);
+        const char *end = strstr(body + 4, "\n---\n");
+        ASSERT_NOT_NULL(end);
+
+        const char *line = body + 4;
+        while (line < end) {
+            const char *eol = strchr(line, '\n');
+            if (!eol || eol > end) {
+                break;
+            }
+            const char *sep = NULL;
+            for (const char *c = line; c < eol - 1; c++) {
+                if (c[0] == ':' && c[1] == ' ') {
+                    sep = c;
+                    break;
+                }
+            }
+            if (sep) {
+                const char *value = sep + 2;
+                /* A value that itself contains ": " must be quoted, or a
+                 * strict parser treats it as a nested mapping. */
+                bool has_inner_colon = false;
+                for (const char *c = value; c < eol - 1; c++) {
+                    if (c[0] == ':' && c[1] == ' ') {
+                        has_inner_colon = true;
+                        break;
+                    }
+                }
+                if (has_inner_colon) {
+                    ASSERT_TRUE(value[0] == '"' || value[0] == '\'');
+                }
+            }
+            line = eol + 1;
+        }
+    }
+    PASS();
+}
+
+TEST(cli_update_accepts_retired_variant_flags_issue1544) {
+    char *ui_argv[] = {"--dry-run", "--ui", "--yes"};
+    char *standard_argv[] = {"--dry-run", "--standard", "--yes"};
+    char *bogus_argv[] = {"--dry-run", "--not-a-flag", "--yes"};
+
+    ASSERT_EQ(cbm_cmd_update(3, ui_argv), 0);
+    ASSERT_EQ(cbm_cmd_update(3, standard_argv), 0);
+    /* Unknown flags stay an error — the point is compatibility, not silence. */
+    ASSERT_TRUE(cbm_cmd_update(3, bogus_argv) != 0);
+    PASS();
+}
+
 #ifdef _WIN32
 /* The Windows update contract, asserted with the activation seam OFF so this
  * takes the exact dispatch a release binary ships: `update` never replaces the
@@ -11928,6 +12230,7 @@ SUITE(cli) {
     RUN_TEST(cli_activation_quiesces_active_cohort_before_mutation);
     RUN_TEST(cli_activation_refuses_when_cohort_does_not_drain);
     RUN_TEST(cli_activation_refusal_note_reaches_diagnostic_issue1416);
+    RUN_TEST(cli_activation_distinguishes_busy_from_reservation_failure_issue1537);
     RUN_TEST(cli_activation_refuses_unsafe_cohort_reservation);
     RUN_TEST(cli_activation_releases_maintenance_lease_after_success);
     RUN_TEST(cli_activation_releases_maintenance_lease_when_mutation_fails);
@@ -11944,6 +12247,8 @@ SUITE(cli) {
     RUN_TEST(cli_install_config_failure_keeps_published_binary);
     RUN_TEST(cli_update_download_failure_does_not_quiesce_sessions);
     RUN_TEST(cli_update_already_current_does_not_quiesce_sessions);
+    RUN_TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554);
+    RUN_TEST(cli_update_accepts_retired_variant_flags_issue1544);
     RUN_TEST(cli_update_agent_configs_finish_before_guard_release);
     RUN_TEST(cli_uninstall_quiesces_active_cohort_before_removing_binary_and_index);
     RUN_TEST(cli_uninstall_preserves_binary_and_index_when_cohort_does_not_drain);
@@ -12075,6 +12380,7 @@ SUITE(cli) {
     RUN_TEST(cli_new_agent_install_plans_use_documented_paths);
     RUN_TEST(cli_new_agent_configs_use_documented_schemas);
     RUN_TEST(cli_agent_reinstall_preserves_foreign_policy_entries);
+    RUN_TEST(cli_hook_conflict_emits_stdout_notice_issue1388);
 #ifndef _WIN32
     RUN_TEST(cli_install_preserves_hook_entries_when_scripts_unowned_issue1387);
 #endif
@@ -12090,6 +12396,9 @@ SUITE(cli) {
     RUN_TEST(cli_hermes_stable_shell_context_contract);
 #ifndef _WIN32
     RUN_TEST(cli_detected_agent_summary_includes_registry_clients);
+#endif
+#ifndef _WIN32
+    RUN_TEST(cli_dry_run_predicts_refused_hook_script_issue1387);
 #endif
     RUN_TEST(cli_agent_client_registry_routes_plan_install_and_uninstall);
     RUN_TEST(cli_registry_installs_kimi_rovo_amp_durable_context);
@@ -12242,6 +12551,7 @@ SUITE(cli) {
     /* Config store (7 tests — group F) */
     RUN_TEST(cli_config_open_close);
     RUN_TEST(cli_config_get_set);
+    RUN_TEST(cli_config_cmd_get_prints_defaults_and_rejects_unknown_keys);
     RUN_TEST(cli_config_get_result_storage_is_per_thread);
     RUN_TEST(cli_config_get_bool);
     RUN_TEST(cli_config_get_int);
