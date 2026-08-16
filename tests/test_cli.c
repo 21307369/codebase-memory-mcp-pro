@@ -687,6 +687,38 @@ TEST(cli_activation_refusal_note_reaches_diagnostic_issue1416) {
  * CBM sessions could not be stopped" sent a reporter hunting processes that a
  * reboot proved did not exist — and the remedy we printed told them to run a
  * cbm binary they had just uninstalled. Each condition now names itself. */
+/* #1537/#1416: the reservation-failure message told readers to "check the
+ * errors above" — and nothing was above. The detail naming the failing
+ * component is recorded on the daemon side and was only surfaced by
+ * `daemon status`, so the CLI replaced a message that blamed the WRONG thing
+ * with one that blamed NOTHING. Two reporters were left with no way forward.
+ *
+ * The assertion is the property, not the wording: the refusal must never point
+ * at evidence it does not show. */
+TEST(cli_activation_refusal_shows_the_detail_it_points_at_issue1537) {
+    cbm_activation_transaction_note_refusal_for_testing(NULL, 0UL);
+    cbm_daemon_ipc_set_validation_detail_for_testing(
+        "/home/u/.cache/codebase-memory-mcp: ancestor '.cache' is not a usable "
+        "private-directory parent");
+
+    cli_activation_fake_t failed = {
+        .mutation_reserve_result = -1,
+    };
+    cbm_cli_activation_ops_t ops = {
+        .context = &failed,
+        .reserve_for_mutation = cli_activation_fake_reserve_mutation,
+        .mutation_lease_release = cli_activation_fake_release_mutation,
+        .visible_diagnostic = cli_activation_fake_diagnostic,
+    };
+    ASSERT_EQ(cbm_cli_activation_guard_with_ops(&ops, cli_activation_fake_mutation, &failed), 1);
+
+    /* The named component must appear, and the dangling pointer must not. */
+    ASSERT_NOT_NULL(strstr(failed.diagnostic, "is not a usable private-directory parent"));
+    ASSERT_NULL(strstr(failed.diagnostic, "Check the errors above"));
+    cbm_daemon_ipc_set_validation_detail_for_testing("");
+    PASS();
+}
+
 TEST(cli_activation_distinguishes_busy_from_reservation_failure_issue1537) {
     cbm_activation_transaction_note_refusal_for_testing(NULL, 0UL);
 
@@ -7349,6 +7381,155 @@ TEST(cli_opencode_honors_custom_config) {
     PASS();
 }
 
+/* Discussion #1560: OpenCode reads either opencode.json or opencode.jsonc, but
+ * we always wrote the .json name. A user whose real config is .jsonc got a
+ * SECOND file that OpenCode ignores — the MCP server silently never appeared
+ * while the install reported success. Prefer an existing .jsonc; with neither
+ * present, .json is still created, so fresh installs are unchanged. */
+TEST(cli_opencode_prefers_existing_jsonc_config_discussion1560) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-opencode-jsonc-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char config_dir[512];
+    snprintf(config_dir, sizeof(config_dir), "%s/.config/opencode", tmpdir);
+    test_mkdirp(config_dir);
+    char jsonc_path[640];
+    snprintf(jsonc_path, sizeof(jsonc_path), "%s/opencode.jsonc", config_dir);
+    write_test_file(jsonc_path, "{\n  // user's hand-written config\n  \"theme\": \"dark\"\n}\n");
+
+    char *saved_path = save_test_env("PATH");
+    char *saved_file = save_test_env("OPENCODE_CONFIG");
+    cbm_setenv("PATH", tmpdir, 1);
+    cbm_unsetenv("OPENCODE_CONFIG");
+
+    char *json = cbm_build_install_plan_json(tmpdir, "/usr/local/bin/codebase-memory-mcp");
+    bool targets_jsonc = json && strstr(json, "/.config/opencode/opencode.jsonc") != NULL;
+
+    free(json);
+    restore_test_env("PATH", saved_path);
+    restore_test_env("OPENCODE_CONFIG", saved_file);
+    test_rmdir_r(tmpdir);
+    if (!targets_jsonc)
+        FAIL("an existing opencode.jsonc must be the install target, not a new opencode.json");
+    PASS();
+}
+
+/* #1630: OpenCode writes `"enabled": true` beside our `command` and `type`, so
+ * an entry we wrote ourselves carries three keys. Our ownership check demanded
+ * an exact key set, classified our own entry as foreign, and refused the whole
+ * install. Confirmed on Linux (#1630) and Windows (#1582) with two independent
+ * configs in which EVERY MCP server carried the key.
+ *
+ * The entry below is the reporters' actual shape. It already says what we would
+ * say, so the correct outcome is success WITHOUT a write - rewriting it would
+ * drop `enabled`, turning a visible refusal into silent config loss. */
+TEST(cli_opencode_accepts_entry_annotated_with_enabled_issue1630) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-opencode-enabled-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/opencode.json", tmpdir);
+    const char *original = "{\n"
+                           "  \"$schema\": \"https://opencode.ai/config.json\",\n"
+                           "  \"mcp\": {\n"
+                           "    \"codebase-memory-mcp\": {\n"
+                           "      \"enabled\": true,\n"
+                           "      \"type\": \"local\",\n"
+                           "      \"command\": [\n"
+                           "        \"/usr/local/bin/codebase-memory-mcp\"\n"
+                           "      ]\n"
+                           "    }\n"
+                           "  }\n"
+                           "}\n";
+    write_test_file(config_path, original);
+
+    int rc = cbm_upsert_opencode_mcp("/usr/local/bin/codebase-memory-mcp", config_path);
+
+    char *after = read_test_file_alloc(config_path);
+    bool preserved = after && strstr(after, "\"enabled\": true") != NULL;
+    bool unchanged = after && strcmp(after, original) == 0;
+    free(after);
+    test_rmdir_r(tmpdir);
+    if (rc != 0)
+        FAIL("an entry annotated with enabled must be accepted, not refused");
+    if (!preserved)
+        FAIL("the client's enabled key must survive");
+    if (!unchanged)
+        FAIL("an already-correct entry must not be rewritten at all");
+    PASS();
+}
+
+/* The other direction: an entry whose command points at a DIFFERENT binary is
+ * genuinely foreign and must still be refused, extra keys or not. Without this
+ * the change above would be a blanket loosening. */
+TEST(cli_opencode_still_refuses_foreign_command_issue1630) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-opencode-foreign-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char config_path[512];
+    snprintf(config_path, sizeof(config_path), "%s/opencode.json", tmpdir);
+    const char *original = "{\n"
+                           "  \"mcp\": {\n"
+                           "    \"codebase-memory-mcp\": {\n"
+                           "      \"enabled\": true,\n"
+                           "      \"type\": \"local\",\n"
+                           "      \"command\": [\n"
+                           "        \"/opt/somebody-elses/binary\"\n"
+                           "      ]\n"
+                           "    }\n"
+                           "  }\n"
+                           "}\n";
+    write_test_file(config_path, original);
+
+    int rc = cbm_upsert_opencode_mcp("/usr/local/bin/codebase-memory-mcp", config_path);
+
+    char *after = read_test_file_alloc(config_path);
+    bool unchanged = after && strcmp(after, original) == 0;
+    free(after);
+    test_rmdir_r(tmpdir);
+    if (rc == 0)
+        FAIL("an entry pointing at a foreign binary must still be refused");
+    if (!unchanged)
+        FAIL("a refused entry must be left byte-identical");
+    PASS();
+}
+
+/* #1038: `uninstall --help` performed a REAL uninstall - it removed the binary
+ * and every agent configuration. The top-level dispatcher matches the
+ * subcommand at argv[1] and forwards the rest, so its own --help check never
+ * saw argv[2], and nothing downstream looked.
+ *
+ * --help is the flag someone types precisely BECAUSE they are unsure what a
+ * command does; it must never be the thing that destroys their install. */
+TEST(cli_uninstall_help_does_not_uninstall_issue1038) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-uninstall-help-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    char bin_dir[512];
+    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", tmpdir);
+    test_mkdirp(bin_dir);
+    char binary[640];
+    snprintf(binary, sizeof(binary), "%s/codebase-memory-mcp", bin_dir);
+    write_test_file(binary, "#!/bin/sh\nexit 0\n");
+
+    char dir_arg[640];
+    snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", bin_dir);
+    char *argv_help[] = {(char *)"uninstall", dir_arg, (char *)"--help"};
+    int rc = cbm_cmd_uninstall(3, argv_help);
+
+    bool binary_survived = access(binary, F_OK) == 0;
+    test_rmdir_r(tmpdir);
+    if (rc != 0)
+        FAIL("uninstall --help must succeed");
+    if (!binary_survived)
+        FAIL("uninstall --help must NOT remove the installed binary");
+    PASS();
+}
+
 TEST(cli_opencode_config_dir_detects_without_retargeting_global_json) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-opencode-dir-XXXXXX");
@@ -8103,6 +8284,22 @@ TEST(cli_codex_session_hook_issue330) {
     ASSERT_NULL(strstr(d, "hooks.SessionStart"));
     ASSERT_NULL(strstr(d, "hooks.SubagentStart"));
     ASSERT(strstr(d, "[mcp_servers.other]") != NULL); /* still preserved after removal */
+
+    /* #1432: Codex may normalize the owned reminder to an inline assignment
+     * and discard our markers. Reinstall must replace that assignment instead
+     * of appending a duplicate TOML key. */
+    write_test_file(cfg, "[hooks]\n"
+                         "SessionStart = [{ matcher = \"startup|resume|clear|compact\", hooks = [{ "
+                         "type = \"command\", command = \"echo \\\"Code discovery: prefer "
+                         "codebase-memory-mcp\\\"\" }] }]\n\n"
+                         "[mcp_servers.codebase-memory-mcp]\n"
+                         "command = \"/Users/me/.local/bin/codebase-memory-mcp\"\n");
+    ASSERT_EQ(cbm_upsert_codex_hooks(cfg), 0);
+    d = read_test_file(cfg);
+    ASSERT_NOT_NULL(d);
+    ASSERT_NULL(strstr(d, "SessionStart = ["));
+    ASSERT_NOT_NULL(strstr(d, "[[hooks.SessionStart]]"));
+    ASSERT_EQ(test_count_substring(d, "[[hooks.SessionStart]]"), 1U);
 
     test_rmdir_r(tmpdir);
     PASS();
@@ -9019,32 +9216,185 @@ TEST(cli_codex_migrates_to_single_hook_representation) {
     snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
     test_mkdirp(codex_dir);
 
+    char binary_dir[512];
+    char binary_path[640];
+    snprintf(binary_dir, sizeof(binary_dir), "%s/.local/bin", tmpdir);
+    test_mkdirp(binary_dir);
+#ifdef _WIN32
+    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp.exe", binary_dir);
+#else
+    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp", binary_dir);
+#endif
+    write_test_file(binary_path, "installed binary must survive failed cleanup\n");
+
+    char *saved_home = save_test_env("HOME");
     char *saved_path = save_test_env("PATH");
     char *saved_codex = save_test_env("CODEX_HOME");
+    cbm_setenv("HOME", tmpdir, 1);
     cbm_setenv("PATH", tmpdir, 1);
     cbm_unsetenv("CODEX_HOME");
-    cbm_install_agent_configs(tmpdir, "/opt/codebase-memory-mcp", false, false);
 
     char hooks_path[640];
     char config_path[640];
     snprintf(hooks_path, sizeof(hooks_path), "%s/hooks.json", codex_dir);
     snprintf(config_path, sizeof(config_path), "%s/config.toml", codex_dir);
+    int first_rc = cbm_install_agent_configs(tmpdir, binary_path, false, false);
+    char *first = read_test_file_alloc(config_path);
+    int repeat_rc = cbm_install_agent_configs(tmpdir, binary_path, false, false);
+    char *repeated = read_test_file_alloc(config_path);
+    int dry_rc = cbm_install_agent_configs(tmpdir, binary_path, false, true);
+    char *after_dry = read_test_file_alloc(config_path);
+
+    write_test_file(config_path,
+                    "[hooks]\nSessionStart = [{ matcher = \"startup|resume|clear|compact\", "
+                    "hooks = [{ type = \"command\", command = \"echo \\\"Code discovery: "
+                    "prefer codebase-memory-mcp\\\"\" }] }]\n");
     write_test_file(hooks_path, "{}\n");
-    cbm_install_agent_configs(tmpdir, "/opt/codebase-memory-mcp", false, false);
+    int migration_rc = cbm_install_agent_configs(tmpdir, binary_path, false, false);
 
     char *toml = read_test_file_alloc(config_path);
     char *hooks = read_test_file_alloc(hooks_path);
-    bool migrated = toml && !strstr(toml, "codebase-memory-mcp SessionStart") && hooks &&
+    bool lifecycle_ok = first_rc == 0 && repeat_rc == 0 && dry_rc == 0 && first && repeated &&
+                        after_dry && strcmp(first, repeated) == 0 && strcmp(first, after_dry) == 0;
+    bool migrated = migration_rc == 0 && toml && !strstr(toml, "SessionStart") && hooks &&
                     strstr(hooks, "SessionStart") && strstr(hooks, "SubagentStart");
+    free(first);
+    free(repeated);
+    free(after_dry);
     free(toml);
     free(hooks);
+
+    const char *ambiguous =
+        "[hooks]\nSessionStart = [{ matcher = \"startup|resume|clear|compact\", hooks = ["
+        "{ type = \"command\", command = 'echo \"Code discovery: prefer "
+        "codebase-memory-mcp\"' }, { type = \"command\", command = \"foreign\" }] }]\n";
+    write_test_file(config_path, ambiguous);
+    char *uninstall_argv[] = {"--yes"};
+    int uninstall_rc = cli_test_cmd_uninstall(1, uninstall_argv);
+    char skill_path[768];
+    char agent_path[768];
+    snprintf(skill_path, sizeof(skill_path), "%s/skills/codebase-memory/SKILL.md", codex_dir);
+    snprintf(agent_path, sizeof(agent_path), "%s/agents/codebase-memory.toml", codex_dir);
+    struct stat state;
+    hooks = read_test_file_alloc(hooks_path);
+    bool independent_cleanup = uninstall_rc != 0 && stat(binary_path, &state) == 0 &&
+                               stat(skill_path, &state) != 0 && stat(agent_path, &state) != 0 &&
+                               hooks && !strstr(hooks, "hook-augment");
+    free(hooks);
+
+    char bad_home[256];
+    snprintf(bad_home, sizeof(bad_home), "/tmp/cli-codex-preflight-XXXXXX");
+    bool no_partial = false;
+    if (cbm_mkdtemp(bad_home)) {
+        char bad_codex[512];
+        char bad_config[640];
+        char bad_agents[640];
+        snprintf(bad_codex, sizeof(bad_codex), "%s/.codex", bad_home);
+        snprintf(bad_config, sizeof(bad_config), "%s/config.toml", bad_codex);
+        snprintf(bad_agents, sizeof(bad_agents), "%s/AGENTS.md", bad_codex);
+        test_mkdirp(bad_codex);
+        write_test_file(bad_config, ambiguous);
+        cbm_setenv("HOME", bad_home, 1);
+        cbm_setenv("PATH", bad_home, 1);
+        int bad_rc = cbm_install_agent_configs(bad_home, binary_path, false, false);
+        char *bad_after = read_test_file_alloc(bad_config);
+        no_partial = bad_rc != 0 && bad_after && strcmp(bad_after, ambiguous) == 0 &&
+                     stat(bad_agents, &state) != 0;
+        free(bad_after);
+        test_rmdir_r(bad_home);
+    }
+    restore_test_env("HOME", saved_home);
     restore_test_env("PATH", saved_path);
     restore_test_env("CODEX_HOME", saved_codex);
     test_rmdir_r(tmpdir);
-    if (!migrated)
-        FAIL("Codex install must leave exactly one lifecycle hook representation");
+    if (!lifecycle_ok || !migrated || !independent_cleanup || !no_partial)
+        FAIL("Codex lifecycle preflight must be idempotent, transactional, and independently "
+             "clean owned side files");
     PASS();
 }
+
+#ifndef _WIN32
+TEST(cli_codex_preflight_reports_heading_and_reason) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-preflight-reason-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char codex_dir[512];
+    char config_path[640];
+    char agents_path[640];
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
+    snprintf(config_path, sizeof(config_path), "%s/config.toml", codex_dir);
+    snprintf(agents_path, sizeof(agents_path), "%s/AGENTS.md", codex_dir);
+    if (test_mkdirp(codex_dir) != 0) {
+        test_rmdir_r(tmpdir);
+        FAIL("failed to create Codex preflight fixture directory");
+    }
+    const char *ambiguous =
+        "[hooks]\nSessionStart = [{ matcher = 'startup|resume|clear|compact', hooks = ["
+        "{ type = 'command', command = 'codebase-memory-mcp hook-augment' }, "
+        "{ type = 'command', command = 'foreign' }] }]\n";
+    if (write_test_file(config_path, ambiguous) != 0) {
+        test_rmdir_r(tmpdir);
+        FAIL("failed to write Codex preflight fixture config");
+    }
+
+    char *saved_home = save_test_env("HOME");
+    char *saved_path = save_test_env("PATH");
+    char *saved_codex = save_test_env("CODEX_HOME");
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("PATH", tmpdir, 1);
+    cbm_unsetenv("CODEX_HOME");
+
+    FILE *capture = tmpfile();
+    int saved_stdout = capture ? dup(STDOUT_FILENO) : -1;
+    int saved_stderr = capture ? dup(STDERR_FILENO) : -1;
+    bool redirected = false;
+    int install_rc = -1;
+    if (capture && saved_stdout >= 0 && saved_stderr >= 0) {
+        fflush(NULL);
+        redirected =
+            dup2(fileno(capture), STDOUT_FILENO) >= 0 && dup2(fileno(capture), STDERR_FILENO) >= 0;
+        if (redirected) {
+            install_rc =
+                cbm_install_agent_configs(tmpdir, "/opt/codebase-memory-mcp", false, false);
+        }
+        fflush(NULL);
+        (void)dup2(saved_stdout, STDOUT_FILENO);
+        (void)dup2(saved_stderr, STDERR_FILENO);
+    }
+    if (saved_stdout >= 0) {
+        close(saved_stdout);
+    }
+    if (saved_stderr >= 0) {
+        close(saved_stderr);
+    }
+
+    char output[8192] = {0};
+    if (capture) {
+        rewind(capture);
+        size_t count = fread(output, 1, sizeof(output) - 1U, capture);
+        output[count] = '\0';
+        fclose(capture);
+    }
+    char *after = read_test_file_alloc(config_path);
+    struct stat state;
+    bool unchanged = after && strcmp(after, ambiguous) == 0 && stat(agents_path, &state) != 0;
+    bool diagnostic =
+        strstr(output, "Codex CLI:\nerror: agent_config agent=Codex CLI op=hook_preflight path=") !=
+            NULL &&
+        strstr(output, "reason=ambiguous_hook_ownership") != NULL;
+    free(after);
+
+    restore_test_env("HOME", saved_home);
+    restore_test_env("PATH", saved_path);
+    restore_test_env("CODEX_HOME", saved_codex);
+    test_rmdir_r(tmpdir);
+    if (!redirected || install_rc == 0 || !unchanged || !diagnostic)
+        FAIL("Codex preflight refusal must retain its heading, reason, and fail-closed state");
+    PASS();
+}
+#endif
 
 /* The PreToolUse augmenter parses search_graph's format:"json" payload to
  * build additionalContext. This test feeds it the REAL envelope from a live
@@ -11958,6 +12308,63 @@ TEST(cli_print_tool_help_issue680) {
     PASS();
 }
 
+/* #1359: `cli <tool>` with no argument-bearing token used to slurp stdin to EOF
+ * for ANY non-terminal stdin. The ordinary automation caller never sends that
+ * EOF — Node's child_process.spawn defaults to stdio:['pipe','pipe','pipe'] and
+ * the parent must call child.stdin.end() explicitly — so `cli list_projects`
+ * parked in fread(0) with no writer and never returned (the reporter's script
+ * was still stuck fourteen minutes later). list_projects declares no schema
+ * properties, so stdin could never have carried anything it accepts: the read
+ * was pure deadlock. Gate the read on the tool actually declaring arguments. */
+TEST(cli_zero_argument_tool_never_reads_stdin_issue1359) {
+    /* The reported hang: zero-argument tool + non-terminal stdin. */
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("list_projects", false));
+
+    /* The documented `echo '<json>' | cli <tool>` channel must survive. */
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("index_status", false));
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("search_graph", false));
+    ASSERT_TRUE(cbm_cli_args_from_stdin_allowed("index_repository", false));
+
+    /* Interactive runs never read the terminal for arguments — unchanged. */
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("index_status", true));
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("list_projects", true));
+
+    /* An unknown tool is rejected by name; blocking for input first can only
+     * delay that verdict, never change it. */
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed("nope_not_a_tool", false));
+    ASSERT_FALSE(cbm_cli_args_from_stdin_allowed(NULL, false));
+    PASS();
+}
+
+/* The gate must track the advertised input_schema for the WHOLE tool table, not
+ * carry a special case for list_projects: a future zero-argument tool would
+ * otherwise reintroduce #1359 silently. Expectation is derived independently
+ * from the schema the MCP tools/list publishes. */
+TEST(cli_stdin_args_gate_tracks_tool_schema_issue1359) {
+    int zero_argument_tools = 0;
+    for (int i = 0; i < cbm_mcp_tool_count(); i++) {
+        const char *name = cbm_mcp_tool_name(i);
+        ASSERT_NOT_NULL(name);
+        const char *schema = cbm_mcp_tool_input_schema(name);
+        ASSERT_NOT_NULL(schema);
+
+        yyjson_doc *doc = yyjson_read(schema, strlen(schema), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *props = yyjson_obj_get(yyjson_doc_get_root(doc), "properties");
+        bool declares_properties = props && yyjson_is_obj(props) && yyjson_obj_size(props) > 0;
+        yyjson_doc_free(doc);
+
+        if (!declares_properties) {
+            zero_argument_tools++;
+        }
+        ASSERT_EQ(cbm_cli_args_from_stdin_allowed(name, false), declares_properties);
+        ASSERT_FALSE(cbm_cli_args_from_stdin_allowed(name, true));
+    }
+    /* list_projects at minimum; without one the sweep above proves nothing. */
+    ASSERT_GTE(zero_argument_tools, 1);
+    PASS();
+}
+
 /* The self-update path verifies a downloaded archive against a published
  * checksum. That check is only meaningful if the digest is actually computed —
  * a broken hash command (it once invoked `shasum -a CBM_SZ_256`, an invalid
@@ -12114,6 +12521,31 @@ TEST(cli_sha256_file_matches_known_vector) {
  * The rule is checked for EVERY skill, not just the one that broke: any
  * frontmatter scalar whose value contains ": " must be quoted. Pinning only
  * the current text would let the next added skill reintroduce it. */
+/* #1558: ui_enabled governs a loopback HTTP listener, and the ONLY way to turn
+ * it off was hand-editing ~/.cache/codebase-memory-mcp/config.json — it was
+ * absent from CONFIG_KEYS, so `config list` could not show it and `config set`
+ * rejected it. A reporter spent two debugging sessions finding the switch. A
+ * network surface a user cannot discover how to disable is not an acceptable
+ * default, whatever its value. */
+TEST(cli_ui_config_keys_are_discoverable_and_settable_issue1558) {
+    bool enabled_listed = false;
+    bool port_listed = false;
+    for (size_t i = 0; i < cbm_cli_config_key_count_for_testing(); i++) {
+        const char *key = cbm_cli_config_key_at_for_testing(i);
+        if (key && strcmp(key, CBM_CONFIG_UI_ENABLED) == 0) {
+            enabled_listed = true;
+        }
+        if (key && strcmp(key, CBM_CONFIG_UI_PORT) == 0) {
+            port_listed = true;
+        }
+    }
+    /* Discoverable: `config list` and `config set` both walk this table, so a
+     * key missing here is a key the user cannot find OR change. */
+    ASSERT_TRUE(enabled_listed);
+    ASSERT_TRUE(port_listed);
+    PASS();
+}
+
 TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554) {
     const cbm_skill_t *sk = cbm_get_skills();
     ASSERT_NOT_NULL(sk);
@@ -12155,6 +12587,77 @@ TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554) {
             }
             line = eol + 1;
         }
+    }
+    PASS();
+}
+
+/* #1566: a binary owned by mise/Homebrew/nix is not ours to relocate, and the
+ * detection must key on POSITIVE evidence — a recognised manager path — not on
+ * "outside our default install dir". The latter misreads an ordinary
+ * `install --dir=/opt/cbm` (and every test binary) as foreign, and would then
+ * REFUSE to update an installation we own. A false positive costs a working
+ * update; a false negative only leaves today's behaviour for an unrecognised
+ * manager, which --skip-binary covers explicitly. */
+TEST(cli_external_manager_detection_needs_positive_evidence_issue1566) {
+    /* Recognised managers -> named. */
+    ASSERT_NOT_NULL(cbm_cli_external_manager_name_for_testing(
+        "/Users/x/.local/share/mise/installs/cbm/0.10.3/bin/codebase-memory-mcp"));
+    ASSERT_NOT_NULL(cbm_cli_external_manager_name_for_testing(
+        "/opt/homebrew/Cellar/codebase-memory-mcp/0.10.3/bin/codebase-memory-mcp"));
+    ASSERT_NOT_NULL(
+        cbm_cli_external_manager_name_for_testing("/nix/store/abc-cbm/bin/codebase-memory-mcp"));
+
+    /* Ours, or merely unusual, must NOT be claimed as externally managed. */
+    ASSERT_NULL(
+        cbm_cli_external_manager_name_for_testing("/Users/x/.local/bin/codebase-memory-mcp"));
+    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("/opt/cbm/codebase-memory-mcp"));
+    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("/usr/local/bin/codebase-memory-mcp"));
+    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("build/c/test-runner"));
+    ASSERT_NULL(cbm_cli_external_manager_name_for_testing(""));
+    ASSERT_NULL(cbm_cli_external_manager_name_for_testing(NULL));
+    PASS();
+}
+
+/* #1558: `install` configured EVERY detected client, so a user who wanted
+ * Claude and Codex had to revert OpenCode and Cursor by hand — and the next
+ * install silently recreated them. The selector restricts it.
+ *
+ * The vocabulary is the part that makes it usable: 26 clients ship, with tokens
+ * nobody would guess (factory-droid, mistral-vibe, copilot-cli). A selector
+ * whose accepted values can only be learned by reading our source is not a
+ * usable selector, so this pins that every client is listed and that an unknown
+ * token is REJECTED rather than silently matching nothing. */
+TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558) {
+    cbm_detected_agents_t all;
+    memset(&all, 1, sizeof(all)); /* every client "detected" */
+
+    /* A known token keeps its client and drops the rest. */
+    cbm_detected_agents_t sel = all;
+    ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing("claude,codex", &sel));
+    ASSERT_TRUE(sel.claude_code);
+    ASSERT_TRUE(sel.codex);
+    ASSERT_FALSE(sel.cursor);
+    ASSERT_FALSE(sel.opencode);
+
+    /* Whitespace around tokens is tolerated — people type it. */
+    cbm_detected_agents_t spaced = all;
+    ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing(" claude , zed ", &spaced));
+    ASSERT_TRUE(spaced.claude_code);
+    ASSERT_TRUE(spaced.zed);
+    ASSERT_FALSE(spaced.codex);
+
+    /* An unknown token must FAIL. Silently treating a typo as "no such client"
+     * would configure nothing and report success. */
+    cbm_detected_agents_t typo = all;
+    ASSERT_FALSE(cbm_cli_clients_apply_selection_for_testing("claude,codx", &typo));
+
+    /* Every token in the table must resolve — a client added to detection but
+     * forgotten here is invisible to the selector. */
+    for (size_t i = 0; i < cbm_cli_clients_count_for_testing(); i++) {
+        const char *token = cbm_cli_clients_token_for_testing(i);
+        ASSERT_NOT_NULL(token);
+        cbm_detected_agents_t one = all;
+        ASSERT_TRUE(cbm_cli_clients_apply_selection_for_testing(token, &one));
     }
     PASS();
 }
@@ -12216,7 +12719,61 @@ TEST(cli_windows_update_hands_off_to_install_script) {
  *  Suite definition
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* #1632: `update` derives the installer command from the BINARY's directory,
+ * which is not the same question as "is the installer there". A binary in
+ * ~/.local/bin with no install.sh beside it still produced:
+ *
+ *     bash "/home/<user>/.local/bin/install.sh"
+ *     /usr/bin/bash: .../install.sh: No such file or directory
+ *
+ * reported on discussion #1560 by a user already three releases deep in install
+ * trouble. `update` exists to tell someone how to proceed; ending on a command
+ * that cannot run is the one outcome it must not produce. */
+TEST(cli_update_only_names_an_installer_that_exists_issue1632) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-installer-probe-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+#ifdef _WIN32
+    const char *installer = "install.ps1";
+#else
+    const char *installer = "install.sh";
+#endif
+
+    /* A directory holding the binary but no installer must not be advertised. */
+    bool absent_is_refused = !cbm_cli_installer_beside_binary(tmpdir);
+
+    char script[512];
+    snprintf(script, sizeof(script), "%s/%s", tmpdir, installer);
+    write_test_file(script, "#!/bin/sh\nexit 0\n");
+    bool present_is_accepted = cbm_cli_installer_beside_binary(tmpdir);
+
+    /* A directory of that name must not count: `bash <dir>` is not a command. */
+    char decoy[512];
+    snprintf(decoy, sizeof(decoy), "%s/decoy", tmpdir);
+    test_mkdirp(decoy);
+    char decoy_installer[640];
+    snprintf(decoy_installer, sizeof(decoy_installer), "%s/%s", decoy, installer);
+    test_mkdirp(decoy_installer);
+    bool directory_is_refused = !cbm_cli_installer_beside_binary(decoy);
+
+    bool empty_is_refused = !cbm_cli_installer_beside_binary("");
+    test_rmdir_r(tmpdir);
+
+    if (!absent_is_refused)
+        FAIL("a directory with no installer must not be named as one");
+    if (!present_is_accepted)
+        FAIL("an installer that is present must be named");
+    if (!directory_is_refused)
+        FAIL("a DIRECTORY named install.sh is not a runnable installer");
+    if (!empty_is_refused)
+        FAIL("an empty directory string must be refused");
+    PASS();
+}
+
 SUITE(cli) {
+    RUN_TEST(cli_update_only_names_an_installer_that_exists_issue1632);
     RUN_TEST(cli_progress_visibility_policy);
     RUN_TEST(cli_raw_mcp_result_preserves_tool_error_status);
     RUN_TEST(cli_maintenance_cancellation_forces_failure_status);
@@ -12230,6 +12787,7 @@ SUITE(cli) {
     RUN_TEST(cli_activation_quiesces_active_cohort_before_mutation);
     RUN_TEST(cli_activation_refuses_when_cohort_does_not_drain);
     RUN_TEST(cli_activation_refusal_note_reaches_diagnostic_issue1416);
+    RUN_TEST(cli_activation_refusal_shows_the_detail_it_points_at_issue1537);
     RUN_TEST(cli_activation_distinguishes_busy_from_reservation_failure_issue1537);
     RUN_TEST(cli_activation_refuses_unsafe_cohort_reservation);
     RUN_TEST(cli_activation_releases_maintenance_lease_after_success);
@@ -12247,7 +12805,10 @@ SUITE(cli) {
     RUN_TEST(cli_install_config_failure_keeps_published_binary);
     RUN_TEST(cli_update_download_failure_does_not_quiesce_sessions);
     RUN_TEST(cli_update_already_current_does_not_quiesce_sessions);
+    RUN_TEST(cli_ui_config_keys_are_discoverable_and_settable_issue1558);
     RUN_TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554);
+    RUN_TEST(cli_external_manager_detection_needs_positive_evidence_issue1566);
+    RUN_TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558);
     RUN_TEST(cli_update_accepts_retired_variant_flags_issue1544);
     RUN_TEST(cli_update_agent_configs_finish_before_guard_release);
     RUN_TEST(cli_uninstall_quiesces_active_cohort_before_removing_binary_and_index);
@@ -12416,6 +12977,10 @@ SUITE(cli) {
     RUN_TEST(cli_antigravity_does_not_imply_gemini);
     RUN_TEST(cli_antigravity_plan_uses_documented_global_files);
     RUN_TEST(cli_opencode_honors_custom_config);
+    RUN_TEST(cli_opencode_prefers_existing_jsonc_config_discussion1560);
+    RUN_TEST(cli_opencode_accepts_entry_annotated_with_enabled_issue1630);
+    RUN_TEST(cli_opencode_still_refuses_foreign_command_issue1630);
+    RUN_TEST(cli_uninstall_help_does_not_uninstall_issue1038);
     RUN_TEST(cli_opencode_config_dir_detects_without_retargeting_global_json);
     RUN_TEST(cli_kiro_and_hermes_homes_are_honored);
     RUN_TEST(cli_detect_agents_finds_official_kiro_cli_executable);
@@ -12451,6 +13016,9 @@ SUITE(cli) {
     RUN_TEST(cli_claude_hook_scripts_shell_quote_binary_path);
     RUN_TEST(cli_claude_hook_commands_shell_quote_custom_config_dir);
     RUN_TEST(cli_codex_migrates_to_single_hook_representation);
+#ifndef _WIN32
+    RUN_TEST(cli_codex_preflight_reports_heading_and_reason);
+#endif
     RUN_TEST(cli_hook_augment_context_tracks_search_json_shape);
     RUN_TEST(cli_hook_augment_lifecycle_output_contract);
     RUN_TEST(cli_hook_augment_subagent_tier_router_contract);
@@ -12574,4 +13142,8 @@ SUITE(cli) {
     RUN_TEST(cli_build_args_json_key_equals_value_issue680);
     RUN_TEST(cli_build_args_json_bad_positional_errors_issue680);
     RUN_TEST(cli_print_tool_help_issue680);
+
+    /* Stdin argument gate (#1359) */
+    RUN_TEST(cli_zero_argument_tool_never_reads_stdin_issue1359);
+    RUN_TEST(cli_stdin_args_gate_tracks_tool_schema_issue1359);
 }

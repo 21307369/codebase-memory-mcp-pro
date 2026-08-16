@@ -2679,6 +2679,72 @@ static int write_coverage_meta(cbm_store_t *store, const char *generation,
     return cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta);
 }
 
+TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_issue1613) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *store = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(store);
+    char source_path[512];
+    snprintf(source_path, sizeof(source_path), "%s/project/main.go", tmp);
+    struct stat source_stat;
+    ASSERT_EQ(stat(source_path, &source_stat), 0);
+#ifdef __APPLE__
+    int64_t source_mtime_ns =
+        ((int64_t)source_stat.st_mtimespec.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+        (int64_t)source_stat.st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    int64_t source_mtime_ns =
+        (int64_t)source_stat.st_mtime * (int64_t)CBM_NSEC_PER_SEC;
+#else
+    int64_t source_mtime_ns =
+        ((int64_t)source_stat.st_mtim.tv_sec * (int64_t)CBM_NSEC_PER_SEC) +
+        (int64_t)source_stat.st_mtim.tv_nsec;
+#endif
+    ASSERT_EQ(cbm_store_upsert_file_hash(store, "test-project", "main.go", "",
+                                         source_mtime_ns, source_stat.st_size),
+              CBM_STORE_OK);
+    cbm_project_t project = {0};
+    ASSERT_EQ(cbm_store_get_project(store, "test-project", &project), CBM_STORE_OK);
+    cbm_coverage_meta_t meta = {
+        .generation = project.indexed_at,
+        .index_mode = "fast",
+        .recorded_at = "2026-07-12T00:00:00Z",
+        .recording_status = "truncated",
+        .ignored_files_stored = 2000,
+        .ignored_files_total = 2001,
+        .coverage_version = 1,
+        .hash_records_complete = true,
+    };
+    ASSERT_EQ(cbm_store_coverage_replace_ex(store, "test-project", NULL, 0, &meta),
+              CBM_STORE_OK);
+    cbm_project_free_fields(&project);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "check_index_coverage",
+        "{\"project\":\"test-project\",\"paths\":[\"main.go\"],\"scopes\":[\".\"]}");
+    ASSERT_NOT_NULL(response);
+    char *inner = extract_text_content(response);
+    ASSERT_NOT_NULL(inner);
+    yyjson_doc *doc = yyjson_read(inner, strlen(inner), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *path = yyjson_arr_get(yyjson_obj_get(root, "paths"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(path, "status")), "no_recorded_issue");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(path, "freshness")), "metadata_match");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(path, "recommended_action")),
+                  "use_graph_with_best_effort_caveat");
+    yyjson_val *scope = yyjson_arr_get(yyjson_obj_get(root, "scopes"), 0);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(scope, "status")), "coverage_unavailable");
+
+    yyjson_doc_free(doc);
+    free(inner);
+    free(response);
+    cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
 TEST(tool_check_index_coverage_rejects_stale_generation) {
     char tmp[256];
     cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
@@ -4583,6 +4649,48 @@ TEST(search_code_path_filter_matches_nothing) {
     PASS();
 }
 
+TEST(search_code_file_pattern_prefilter_boundaries) {
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.pas"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.PAS"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.d.ts"));
+    ASSERT_TRUE(cbm_search_code_file_pattern_can_prefilter("*.foo-bar_1"));
+
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(NULL));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(""));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter(".pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*.*"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("src/*.pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("src\\*.pas"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*.c++"));
+    ASSERT_FALSE(cbm_search_code_file_pattern_can_prefilter("*R&D*.go"));
+    PASS();
+}
+
+TEST(search_code_windows_prefilter_precedes_content_scan) {
+#ifdef _WIN32
+    char command[CBM_SZ_4K];
+    cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*.go", "C:/tmp/pattern",
+                                   "C:/tmp/filelist", "C:/tmp/root");
+
+    const char *prefilter = strstr(command, "Where-Object { $_ -like '*.go' }");
+    const char *content_scan = strstr(command, "ForEach-Object { Select-String");
+    const char *postfilter = strstr(command, "Where-Object { $_.Path -like '**.go' }");
+    ASSERT_NOT_NULL(prefilter);
+    ASSERT_NOT_NULL(content_scan);
+    ASSERT_NOT_NULL(postfilter);
+    ASSERT_TRUE(prefilter < content_scan);
+    ASSERT_TRUE(content_scan < postfilter);
+
+    cbm_search_code_build_grep_cmd(command, sizeof(command), false, true, "*handler*.go",
+                                   "C:/tmp/pattern", "C:/tmp/filelist", "C:/tmp/root");
+    ASSERT_NULL(strstr(command, "Where-Object { $_ -like '*handler*.go' }"));
+    ASSERT_NOT_NULL(strstr(command, "Where-Object { $_.Path -like '**handler*.go' }"));
+    PASS();
+#else
+    SKIP_PLATFORM("PowerShell prefilter runs on Windows");
+#endif
+}
+
 /* issue #283: search_code with regex=true and a syntactically invalid pattern
  * must return an explicit error, not an empty result indistinguishable from a
  * legitimate no-match. */
@@ -4633,6 +4741,46 @@ TEST(search_code_literal_pipe_warns_issue282) {
     ASSERT_NOT_NULL(strstr(resp, "regex=true")); /* the hint names the fix */
     ASSERT_NOT_NULL(strstr(resp, "elapsed_ms")); /* timing is reported */
     free(resp);
+
+    cleanup_snippet_dir(tmp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+TEST(search_code_reports_phase_timings_only_in_debug_mode) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char *response = cbm_mcp_handle_tool(
+        srv, "search_code", "{\"pattern\":\"HandleRequest\",\"project\":\"test-project\"}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NULL(strstr(response, "scope_ms"));
+    ASSERT_NULL(strstr(response, "scan_ms"));
+    ASSERT_NULL(strstr(response, "enrich_ms"));
+    ASSERT_NOT_NULL(strstr(response, "elapsed_ms"));
+    free(response);
+
+    response = cbm_mcp_handle_tool(
+        srv, "search_code",
+        "{\"pattern\":\"HandleRequest\",\"project\":\"test-project\",\"debug\":true}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "scope_ms"));
+    ASSERT_NOT_NULL(strstr(response, "scan_ms"));
+    ASSERT_NOT_NULL(strstr(response, "enrich_ms"));
+    ASSERT_NOT_NULL(strstr(response, "elapsed_ms"));
+    free(response);
+
+    response = cbm_mcp_handle_tool(
+        srv, "search_code",
+        "{\"pattern\":\"HandleRequest\",\"project\":\"test-project\",\"format\":\"json\","
+        "\"debug\":true}");
+    ASSERT_NOT_NULL(response);
+    ASSERT_NOT_NULL(strstr(response, "\\\"scope_ms\\\":"));
+    ASSERT_NOT_NULL(strstr(response, "\\\"scan_ms\\\":"));
+    ASSERT_NOT_NULL(strstr(response, "\\\"enrich_ms\\\":"));
+    ASSERT_NOT_NULL(strstr(response, "\\\"elapsed_ms\\\":"));
+    free(response);
 
     cleanup_snippet_dir(tmp);
     cbm_mcp_server_free(srv);
@@ -10763,6 +10911,7 @@ SUITE(mcp) {
     RUN_TEST(tool_check_index_coverage_finds_path_beyond_status_cap);
     RUN_TEST(tool_check_index_coverage_reports_paths_scopes_and_ranges);
     RUN_TEST(tool_check_index_coverage_preserves_multiple_scope_labels);
+    RUN_TEST(tool_check_index_coverage_accepts_truncated_ignored_catalog_for_fresh_path_issue1613);
     RUN_TEST(tool_check_index_coverage_rejects_stale_generation);
     RUN_TEST(tool_check_index_coverage_requires_source_when_file_metadata_changed);
     RUN_TEST(tool_check_index_coverage_surfaces_lookup_errors);
@@ -10807,8 +10956,11 @@ SUITE(mcp) {
 #endif
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
+    RUN_TEST(search_code_file_pattern_prefilter_boundaries);
+    RUN_TEST(search_code_windows_prefilter_precedes_content_scan);
     RUN_TEST(search_code_invalid_regex_errors_issue283);
     RUN_TEST(search_code_literal_pipe_warns_issue282);
+    RUN_TEST(search_code_reports_phase_timings_only_in_debug_mode);
     RUN_TEST(search_code_ampersand_accepted_issue272);
     RUN_TEST(tool_detect_changes_no_project);
     RUN_TEST(tool_manage_adr_no_project);

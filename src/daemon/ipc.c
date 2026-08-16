@@ -42,6 +42,13 @@ static void ipc_validation_detail_set(const char *format, ...) {
     va_end(arguments);
 }
 
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_daemon_ipc_set_validation_detail_for_testing(const char *detail) {
+    (void)snprintf(ipc_validation_detail_buffer, sizeof(ipc_validation_detail_buffer), "%s",
+                   detail ? detail : "");
+}
+#endif
+
 const char *cbm_daemon_ipc_validation_detail(void) {
     return ipc_validation_detail_buffer;
 }
@@ -1458,11 +1465,23 @@ static int private_directory_tree_open(const char *directory_path) {
                  * caller fell back to printing errno — which NOTHING here sets.
                  * A reporter was handed "errno 2" (ENOENT) for a permission
                  * refusal and went looking for a missing file that existed.
-                 * An unset errno is not a diagnosis; name the component. */
-                ipc_validation_detail_set("%s: ancestor '%s' is not a usable private-directory "
-                                          "parent (must be owned by you, not world-writable, and "
-                                          "carry no allow-ACL)",
-                                          directory_path, component);
+                 * An unset errno is not a diagnosis.
+                 *
+                 * The first version of that fix then named the WRONG directory.
+                 * posix_directory_parent_secure() validates current_fd — the
+                 * directory we are already in — but the message printed
+                 * `component`, the child about to be entered. So #1537 read
+                 * "ancestor '.cache'" when /Users/<user> was refusing, and
+                 * #1621 read "cbm-daemon-501" when /private/tmp was. Both
+                 * reporters inspected a directory that was not the one
+                 * refusing, found it clean, and said so — correctly. Naming the
+                 * containing directory is the difference between a report we
+                 * can act on and weeks of talking past each other. */
+                ipc_validation_detail_set(
+                    "%s: the directory CONTAINING '%s' is not a usable private-directory parent "
+                    "(it must be owned by you, not world-writable, and carry no allow-ACL). Check "
+                    "that containing directory, not '%s' itself",
+                    directory_path, component, component);
             }
             bool created = ok && mkdirat(current_fd, component, 0700) == 0;
             if (!created && errno != EEXIST) {
@@ -3980,8 +3999,45 @@ static bool win_sid_trusted(win_security_t *security, PSID sid) {
            win_sid_is_trusted_installer((const uint8_t *)sid, (size_t)sid_length);
 }
 
+/* AppContainer identities: package SIDs (S-1-15-2-*) and capability SIDs
+ * (S-1-15-3-*), under the APP_PACKAGE identifier authority (15).
+ *
+ * These are tolerated on ANCESTOR components only — never on the private
+ * runtime directory itself, which keeps demanding the exact current user.
+ *
+ * Why they are admissible there: a sandboxed package's ACE on %LOCALAPPDATA%
+ * grants that package, and a process cannot select which AppContainer it runs
+ * in — the identity is stamped by the OS at process creation from the package
+ * it was launched from. So such an ACE cannot be exercised by arbitrary local
+ * code the way a live local group can. What it does permit is the packaged
+ * application itself; that is the residual risk this exemption accepts, and it
+ * is the same trust already extended to whatever installed that package.
+ *
+ * Why BOTH forms: capability SIDs alone are not enough. The most common real
+ * ACE of this shape is `S-1-15-2-*` — a package SID. On reported machines it
+ * resolves through HKCR\...\AppContainer\Mappings to Anthropic Claude
+ * Desktop, an application many of our users run and cannot be asked to
+ * uninstall. Covering only S-1-15-3-* leaves exactly that case failing.
+ *
+ * Grounded in #1533 (four independent reproductions across four SID classes)
+ * and #1574. Approach and the ancestor-only boundary follow @mlandolfi90's
+ * PR #1447, extended to package SIDs. */
+static bool win_sid_is_app_container(const uint8_t *sid, size_t sid_length) {
+    if (!windows_sid_valid(sid, sid_length) || sid[1] < 1U) {
+        return false;
+    }
+    /* identifier authority must be exactly 15 (APP_PACKAGE_AUTHORITY) */
+    if (sid[2] != 0U || sid[3] != 0U || sid[4] != 0U || sid[5] != 0U || sid[6] != 0U ||
+        sid[7] != 15U) {
+        return false;
+    }
+    uint32_t first = win_sid_read_u32_le(sid + 8U);
+    return first == 2U || first == 3U;
+}
+
 static bool win_bounded_sid_trusted(win_security_t *security, const uint8_t *sid,
-                                    size_t sid_capacity, bool creator_owner_inherit_only) {
+                                    size_t sid_capacity, bool creator_owner_inherit_only,
+                                    bool ancestor) {
     if (!security || !sid || sid_capacity < 8U || sid[1] > 15U) {
         return false;
     }
@@ -3997,7 +4053,8 @@ static bool win_bounded_sid_trusted(win_security_t *security, const uint8_t *sid
              * user, so such an ACE only ever grants to us. Default Windows
              * profile/temp ACLs (and GitHub runner profiles) carry it, and
              * rejecting it locked real current-user directories out. */
-            security->is_well_known_sid((PSID)sid, WinCreatorOwnerRightsSid));
+            security->is_well_known_sid((PSID)sid, WinCreatorOwnerRightsSid) ||
+            (ancestor && win_sid_is_app_container(sid, sid_length)));
 }
 
 static bool win_file_owner_secure(win_security_t *security, HANDLE file,
@@ -4032,7 +4089,8 @@ static DWORD win_private_mutation_rights(void) {
            DELETE | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY;
 }
 
-static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mutation) {
+static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mutation,
+                                bool ancestor) {
     PACL dacl = NULL;
     PSECURITY_DESCRIPTOR descriptor = NULL;
     DWORD status = security->get_security_info(file, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
@@ -4073,7 +4131,8 @@ static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mut
         const uint8_t *sid = (const uint8_t *)&ace->SidStart;
         size_t sid_capacity = (size_t)header->AceSize - sid_offset;
         bool creator_owner_inherit_only = (header->AceFlags & INHERIT_ONLY_ACE) != 0U;
-        if (!win_bounded_sid_trusted(security, sid, sid_capacity, creator_owner_inherit_only)) {
+        if (!win_bounded_sid_trusted(security, sid, sid_capacity, creator_owner_inherit_only,
+                                     ancestor)) {
             /* Name the untrusted identity class so a harness/profile ACL leak
              * (an inherited Users / Authenticated Users / Everyone ACE) is
              * distinguishable from a genuinely hostile grant. */
@@ -4106,9 +4165,9 @@ static bool win_file_acl_secure(win_security_t *security, HANDLE file, DWORD mut
 }
 
 static bool win_file_security_secure(win_security_t *security, HANDLE file,
-                                     bool require_current_user, DWORD mutation) {
+                                     bool require_current_user, DWORD mutation, bool ancestor) {
     return win_file_owner_secure(security, file, require_current_user) &&
-           win_file_acl_secure(security, file, mutation);
+           win_file_acl_secure(security, file, mutation, ancestor);
 }
 
 static bool win_runtime_directory_secure(const wchar_t *runtime_dir) {
@@ -4172,7 +4231,7 @@ static bool win_runtime_directory_secure(const wchar_t *runtime_dir) {
     }
     bool final_private =
         secure_result == ERROR_SUCCESS &&
-        win_file_security_secure(&security, directory, true, win_private_mutation_rights());
+        win_file_security_secure(&security, directory, true, win_private_mutation_rights(), false);
     (void)CloseHandle(directory);
     win_security_destroy(&security);
     return valid_handle && owner_ok && final_private;
@@ -4195,7 +4254,7 @@ static bool win_directory_component_secure(win_security_t *security, const wchar
     bool valid = GetFileInformationByHandle(directory, &info) != 0 &&
                  (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
                  (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
-                 win_file_security_secure(security, directory, false, mutation);
+                 win_file_security_secure(security, directory, false, mutation, true);
     (void)CloseHandle(directory);
     return valid;
 }
