@@ -655,6 +655,21 @@ TEST(swift_class) {
     PASS();
 }
 
+TEST(swift_protocol) {
+    /* A protocol requirement is a bodyless func inside a protocol body. Swift
+     * codebases are heavily protocol-driven, so the requirement is very often
+     * the declaration a reader is actually looking for — before this it was
+     * absent from the graph entirely. */
+    CBMFileResult *r = extract("protocol StudyRunning {\n    func generate() -> String\n}\n",
+                               CBM_LANG_SWIFT, "t", "StudyRunning.swift");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT(has_def(r, "Interface", "StudyRunning"));
+    ASSERT(has_def(r, "Method", "generate"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Kotlin --- */
 TEST(kotlin_function) {
     CBMFileResult *r = extract("fun greet(name: String): String = \"Hello $name\"\nfun main() { "
@@ -5545,6 +5560,7 @@ SUITE(extraction) {
     RUN_TEST(csharp_class);
     RUN_TEST(csharp_interface);
     RUN_TEST(swift_class);
+    RUN_TEST(swift_protocol);
     RUN_TEST(kotlin_function);
     RUN_TEST(kotlin_class);
     RUN_TEST(scala_function);
