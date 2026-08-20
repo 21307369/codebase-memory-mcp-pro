@@ -124,6 +124,7 @@ enum {
  * growing getline buffers without bound through ignored extension headers. */
 #define MCP_MAX_MESSAGE_SIZE ((size_t)10U * 1024U * 1024U)
 #define MCP_MAX_HEADER_SIZE ((size_t)8U * 1024U)
+#define MCP_SEARCH_OUTPUT_MAX ((size_t)64U * 1024U * 1024U)
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -621,8 +622,14 @@ static const tool_def_t TOOLS[] = {
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
      "\",\"default\":10,\"minimum\":1}},\"required\":[\"pattern\",\"project\"]}"},
 
-    {"list_projects", "List projects", "List all indexed projects",
-     "{\"type\":\"object\",\"properties\":{}}"},
+    {"list_projects", "List projects", "List indexed projects with deterministic pagination",
+     "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\","
+     "\"minimum\":0,\"default\":0},"
+     "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100,\"default\":50},"
+     "\"include_details\":{\"type\":\"boolean\",\"default\":false,"
+     "\"description\":\"Include branch, node/edge counts and database size. Slower.\"},"
+     "\"metadata_only\":{\"type\":\"boolean\",\"description\":\"Deprecated compatibility "
+     "alias for include_details=false.\"}}}"},
     {"delete_project", "Delete project", "Delete a project from the index",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
@@ -1586,6 +1593,7 @@ struct cbm_mcp_server {
     void *quarantine_test_context;
     cbm_mcp_command_test_hook_fn command_test_hook;
     void *command_test_context;
+    size_t search_output_limit_override;
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
 
@@ -1882,6 +1890,12 @@ void cbm_mcp_server_set_command_test_hook(cbm_mcp_server_t *srv, cbm_mcp_command
     }
     srv->command_test_hook = hook;
     srv->command_test_context = context;
+}
+
+void cbm_mcp_server_set_search_output_limit_for_test(cbm_mcp_server_t *srv, size_t limit) {
+    if (srv) {
+        srv->search_output_limit_override = limit;
+    }
 }
 
 /* ── Cache dir + project DB path helpers ───────────────────────── */
@@ -2517,7 +2531,7 @@ static cbm_store_t *resolve_store_fallback_scan(const char *project) {
  * then append a JSON entry to arr. */
 static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, const char *dir_path,
                                      const char *name, size_t name_len, int64_t size_bytes,
-                                     bool metadata_only) {
+                                     bool include_details) {
     (void)name_len;
 
     char full_path[CBM_SZ_2K];
@@ -2536,7 +2550,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
 
     int nodes = 0;
     int edges = 0;
-    if (!metadata_only) {
+    if (include_details) {
         nodes = cbm_store_count_nodes(pstore, project_name);
         edges = cbm_store_count_edges(pstore, project_name);
     }
@@ -2557,7 +2571,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
      * disambiguates same-repo projects). The 12-field git block — mostly
      * null for non-git roots — cost ~10KB across a full cache and is one
      * index_status call away for the project you actually care about. */
-    if (!metadata_only && root_path_buf[0]) {
+    if (include_details && root_path_buf[0]) {
         cbm_git_context_t gctx = {0};
         (void)cbm_git_context_resolve(root_path_buf, &gctx);
         if (gctx.is_git && gctx.branch) {
@@ -2565,7 +2579,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
         }
         cbm_git_context_free(&gctx);
     }
-    if (!metadata_only) {
+    if (include_details) {
         yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
         yyjson_mut_obj_add_int(doc, p, "edges", edges);
         yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
@@ -2573,18 +2587,36 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     yyjson_mut_arr_add_val(arr, p);
 }
 
+static int project_db_name_cmp(const void *a, const void *b) {
+    const char *const *sa = (const char *const *)a;
+    const char *const *sb = (const char *const *)b;
+    return strcmp(*sa, *sb);
+}
+
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     (void)srv;
-    bool metadata_only = false;
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int limit = cbm_mcp_get_int_arg(args, "limit", 50);
+    bool include_details = cbm_mcp_get_bool_arg(args, "include_details");
     yyjson_doc *args_doc = args ? yyjson_read(args, strlen(args), 0) : NULL;
     yyjson_val *args_root = args_doc ? yyjson_doc_get_root(args_doc) : NULL;
     yyjson_val *metadata_value =
         args_root && yyjson_is_obj(args_root) ? yyjson_obj_get(args_root, "metadata_only") : NULL;
-    metadata_only = metadata_value && yyjson_is_true(metadata_value);
+    if (metadata_value && yyjson_is_true(metadata_value)) {
+        include_details = false;
+    }
     if (args_doc) {
         yyjson_doc_free(args_doc);
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (limit < 1) {
+        limit = 1;
+    } else if (limit > 100) {
+        limit = 100;
     }
 
     char dir_path[CBM_SZ_1K];
@@ -2607,6 +2639,10 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         return cbm_mcp_text_result(msg, true);
     }
 
+    char **db_names = NULL;
+    size_t db_count = 0;
+    size_t db_cap = 0;
+    bool name_collection_failed = false;
     cbm_dirent_t *entry;
     while ((entry = cbm_readdir(d)) != NULL) {
         const char *name = entry->name;
@@ -2614,17 +2650,65 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         if (!is_project_db_file(name, len)) {
             continue;
         }
+        if (db_count == db_cap) {
+            size_t next_cap = db_cap ? db_cap * 2 : 64;
+            char **grown = realloc(db_names, next_cap * sizeof(*db_names));
+            if (!grown) {
+                name_collection_failed = true;
+                break;
+            }
+            db_names = grown;
+            db_cap = next_cap;
+        }
+        db_names[db_count] = heap_strdup(name);
+        if (!db_names[db_count]) {
+            name_collection_failed = true;
+            break;
+        }
+        db_count++;
+    }
+    cbm_closedir(d);
+
+    if (name_collection_failed) {
+        for (size_t i = 0; i < db_count; i++) {
+            free(db_names[i]);
+        }
+        free(db_names);
+        yyjson_mut_doc_free(doc);
+        return cbm_mcp_text_result(
+            "{\"error\":\"out of memory while collecting indexed projects\"}", true);
+    }
+
+    if (db_count > 1) {
+        qsort(db_names, db_count, sizeof(*db_names), project_db_name_cmp);
+    }
+    size_t start = (size_t)offset < db_count ? (size_t)offset : db_count;
+    size_t end = start + (size_t)limit;
+    if (end > db_count) {
+        end = db_count;
+    }
+    for (size_t i = start; i < end; i++) {
+        const char *name = db_names[i];
+        size_t len = strlen(name);
         char full_path[CBM_SZ_2K];
         snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
         int64_t size_bytes = cbm_file_size(full_path);
         if (size_bytes < 0) {
             continue;
         }
-        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, metadata_only);
+        build_project_json_entry(doc, arr, dir_path, name, len, size_bytes, include_details);
     }
-    cbm_closedir(d);
+    for (size_t i = 0; i < db_count; i++) {
+        free(db_names[i]);
+    }
+    free(db_names);
 
     yyjson_mut_obj_add_val(doc, root, "projects", arr);
+    yyjson_mut_obj_add_uint(doc, root, "total", db_count);
+    yyjson_mut_obj_add_int(doc, root, "offset", offset);
+    yyjson_mut_obj_add_int(doc, root, "limit", limit);
+    yyjson_mut_obj_add_uint(doc, root, "returned", yyjson_mut_arr_size(arr));
+    yyjson_mut_obj_add_bool(doc, root, "has_more", end < db_count);
 
     /* Guide user when no projects are indexed */
     if (yyjson_mut_arr_size(arr) == 0) {
@@ -2950,6 +3034,9 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "        - CASE WHEN n.label IN ('Function','Method') THEN 10.0 "
         "               WHEN n.label = 'Route' THEN 8.0 "
         "               WHEN n.label IN (" CBM_SQL_TYPE_LIKE_LABELS ") THEN 5.0 "
+        /* Relations rank with the type tier: a table IS the schema container
+         * a data question is looking for (findability-first). */
+        "               WHEN n.label IN (" CBM_SQL_RELATION_LABELS ") THEN 5.0 "
         "               ELSE 0.0 END) AS rank "
         "FROM ("
         "    SELECT rowid, bm25(nodes_fts) AS base_rank"
@@ -3187,22 +3274,6 @@ static bool run_semantic_query_core(const char *args, cbm_store_t *store, const 
     return type_error;
 }
 
-/* Append the semantic_query vector-search results onto the doc.  Returns
- * true if semantic_query was provided as a non-array (type error — caller
- * should surface to the user). */
-static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const char *args,
-                               cbm_store_t *store, const char *project, int limit) {
-    cbm_vector_result_t *vresults = NULL;
-    int vcount = 0;
-    bool type_error =
-        run_semantic_query_core(args, store, project, limit, &vresults, &vcount, NULL);
-    if (vcount > 0) {
-        emit_semantic_results(doc, root, vresults, vcount);
-        cbm_store_free_vector_results(vresults, vcount);
-    }
-    return type_error;
-}
-
 /* ── Tree output for search_graph ───────────────────────────────────
  * Default response encoding: grouped tree rows (compact_out.h). The same
  * model is available as structured JSON via format:"json"; include_connected
@@ -3274,6 +3345,27 @@ static int sg_parse_fields(const char *args, const char *out[], int max_out, yyj
     return n;
 }
 
+/* Append a property as one compact-output cell. Compound values stay one
+ * column by using their compact JSON representation; the cell emitter quotes
+ * and escapes that representation as needed. */
+static void sg_toon_property_cell(cbm_sb_t *sb, yyjson_val *v) {
+    if (v && yyjson_is_str(v)) {
+        cbm_tree_cell_str(sb, yyjson_get_str(v), false);
+    } else if (v && yyjson_is_bool(v)) {
+        cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
+    } else if (v && yyjson_is_int(v)) {
+        cbm_tree_cell_int(sb, yyjson_get_int(v), false);
+    } else if (v && yyjson_is_real(v)) {
+        cbm_tree_cell_real(sb, yyjson_get_real(v), false);
+    } else if (v && !yyjson_is_null(v)) {
+        char *json = yyjson_val_write(v, 0, NULL);
+        cbm_tree_cell_str(sb, json ? json : "", false);
+        free(json);
+    } else {
+        cbm_tree_cell_str(sb, "", false);
+    }
+}
+
 /* Append one row's extra-field cells, pulled from the node's properties. */
 static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char *const *fields,
                                 int nfields) {
@@ -3282,17 +3374,7 @@ static void sg_toon_extra_cells(cbm_sb_t *sb, const char *props_json, const char
     yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
     for (int f = 0; f < nfields; f++) {
         yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-        if (v && yyjson_is_str(v)) {
-            cbm_tree_cell_str(sb, yyjson_get_str(v), false);
-        } else if (v && yyjson_is_bool(v)) {
-            cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
-        } else if (v && yyjson_is_int(v)) {
-            cbm_tree_cell_int(sb, yyjson_get_int(v), false);
-        } else if (v && yyjson_is_real(v)) {
-            cbm_tree_cell_real(sb, yyjson_get_real(v), false);
-        } else {
-            cbm_tree_cell_str(sb, "", false);
-        }
+        sg_toon_property_cell(sb, v);
     }
     if (pd) {
         yyjson_doc_free(pd);
@@ -3424,17 +3506,7 @@ static void emit_search_results_tree(cbm_sb_t *sb, cbm_search_output_t *out, int
             yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
             for (int f = 0; f < nfields; f++) {
                 yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    cbm_tree_cell_str(sb, yyjson_get_str(v), false);
-                } else if (v && yyjson_is_int(v)) {
-                    cbm_tree_cell_int(sb, yyjson_get_int(v), false);
-                } else if (v && yyjson_is_real(v)) {
-                    cbm_tree_cell_real(sb, yyjson_get_real(v), false);
-                } else if (v && yyjson_is_bool(v)) {
-                    cbm_tree_cell_bool(sb, yyjson_get_bool(v), false);
-                } else {
-                    cbm_tree_cell_str(sb, "", false); /* emits "-" */
-                }
+                sg_toon_property_cell(sb, v);
             }
             if (pd) {
                 yyjson_doc_free(pd);
@@ -3516,14 +3588,10 @@ static void emit_search_results_tree_json(yyjson_mut_doc *doc, yyjson_mut_val *r
             yyjson_val *pr = pd ? yyjson_doc_get_root(pd) : NULL;
             for (int f = 0; f < nfields; f++) {
                 yyjson_val *v = (pr && yyjson_is_obj(pr)) ? yyjson_obj_get(pr, fields[f]) : NULL;
-                if (v && yyjson_is_str(v)) {
-                    yyjson_mut_arr_add_strcpy(doc, row, yyjson_get_str(v));
-                } else if (v && yyjson_is_int(v)) {
-                    yyjson_mut_arr_add_int(doc, row, yyjson_get_int(v));
-                } else if (v && yyjson_is_real(v)) {
-                    yyjson_mut_arr_add_real(doc, row, yyjson_get_real(v));
-                } else if (v && yyjson_is_bool(v)) {
-                    yyjson_mut_arr_add_bool(doc, row, yyjson_get_bool(v));
+                yyjson_mut_val *copy =
+                    (v && !yyjson_is_null(v)) ? yyjson_val_mut_copy(doc, v) : NULL;
+                if (copy) {
+                    yyjson_mut_arr_add_val(row, copy);
                 } else {
                     yyjson_mut_arr_add_null(doc, row);
                 }
@@ -3637,6 +3705,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         .min_degree = min_degree,
         .max_degree = max_degree,
     };
+    bool has_structural_filters = label || name_pattern || qn_pattern || file_pattern ||
+                                  relationship || exclude_entry_points ||
+                                  min_degree != CBM_NOT_FOUND || max_degree != CBM_NOT_FOUND;
 
     if (!legacy_json) {
         const char *fields[SG_MAX_EXTRA_FIELDS];
@@ -3657,10 +3728,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
             /* Semantic-only calls get semantic results only: the legacy
              * behavior also ran the UNFILTERED regex search and prepended
              * up to `limit` unrelated enriched nodes to the response. */
-            bool has_filters = label || name_pattern || qn_pattern || file_pattern ||
-                               relationship || exclude_entry_points ||
-                               min_degree != CBM_NOT_FOUND || max_degree != CBM_NOT_FOUND;
-            bool semantic_only = sq_present && !has_filters;
+            bool semantic_only = sq_present && !has_structural_filters;
 
             cbm_sb_t sb;
             cbm_sb_init(&sb);
@@ -3744,8 +3812,31 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
             true);
     }
 
+    cbm_vector_result_t *vresults = NULL;
+    int vcount = 0;
+    bool sq_present = false;
+    bool sq_type_error =
+        run_semantic_query_core(args, store, project, limit, &vresults, &vcount, &sq_present);
+    if (sq_type_error) {
+        free(project);
+        free(label);
+        free(name_pattern);
+        free(qn_pattern);
+        free(file_pattern);
+        free(relationship);
+        return cbm_mcp_text_result(
+            "semantic_query must be an array of keyword strings, e.g. "
+            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
+            "into individual keywords; each is scored independently via per-keyword "
+            "min-cosine.",
+            true);
+    }
+
+    bool semantic_only = sq_present && !has_structural_filters;
     cbm_search_output_t out = {0};
-    cbm_store_search(store, &params, &out);
+    if (!semantic_only) {
+        cbm_store_search(store, &params, &out);
+    }
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -3784,23 +3875,9 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         }
     }
 
-    bool sq_type_error = run_semantic_query(doc, root, args, store, project, limit);
-
-    if (sq_type_error) {
-        yyjson_mut_doc_free(doc);
-        cbm_store_search_free(&out);
-        free(project);
-        free(label);
-        free(name_pattern);
-        free(qn_pattern);
-        free(file_pattern);
-        free(relationship);
-        return cbm_mcp_text_result(
-            "semantic_query must be an array of keyword strings, e.g. "
-            "[\"send\",\"pubsub\",\"publish\"] — not a single string. Split your query "
-            "into individual keywords; each is scored independently via per-keyword "
-            "min-cosine.",
-            true);
+    if (vcount > 0) {
+        emit_semantic_results(doc, root, vresults, vcount);
+        cbm_store_free_vector_results(vresults, vcount);
     }
 
     char *json = yy_doc_to_str(doc);
@@ -5750,14 +5827,23 @@ static yyjson_doc *resolve_trace_edge_types(const char *args, const char *mode,
     return NULL;
 }
 
-/* Check if a file path looks like a test file. */
+/* Check if a file path looks like a test file. The substring checks below
+ * only catch a tests/ directory nested under another path component
+ * (".../tests/foo"); a project-root-relative path like "tests/repro/foo.c"
+ * has no leading slash before "tests" and fell through undetected, leaking
+ * whole test subtrees into query_graph/trace_path results with the default
+ * include_tests=false (#1294). */
 static bool is_test_file(const char *path) {
     if (!path) {
         return false;
     }
     return strstr(path, "/test") != NULL || strstr(path, "test_") != NULL ||
            strstr(path, "_test.") != NULL || strstr(path, "/tests/") != NULL ||
-           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL;
+           strstr(path, "/spec/") != NULL || strstr(path, ".test.") != NULL ||
+           strncmp(path, "tests/", SLEN("tests/")) == 0 ||
+           strncmp(path, "test/", SLEN("test/")) == 0 ||
+           strncmp(path, "spec/", SLEN("spec/")) == 0 ||
+           strncmp(path, "__tests__/", SLEN("__tests__/")) == 0;
 }
 
 /* Convert BFS traversal results into a yyjson_mut array. */
@@ -7281,6 +7367,54 @@ static void add_parse_partial_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
     yyjson_mut_obj_add_val(doc, root, "parse_partial", pp);
 }
 
+/* The pipeline persists the complete current coverage set before this
+ * response is built. Prefer that set over the per-run errors so incremental
+ * runs that do not revisit a flagged file, and artifact bootstraps, do not
+ * make existing gaps appear to have vanished. By-design exclusions have
+ * their own response surface and are not failures. */
+static bool add_persisted_failure_summaries(yyjson_mut_doc *doc, yyjson_mut_val *root,
+                                            cbm_store_t *store, const char *project,
+                                            const char *logfile) {
+    cbm_coverage_row_t *rows = NULL;
+    int row_count = 0;
+    if (cbm_store_coverage_get(store, project, &rows, &row_count) != CBM_STORE_OK) {
+        return false;
+    }
+
+    int failure_count = 0;
+    for (int i = 0; i < row_count; i++) {
+        const char *kind = rows[i].kind ? rows[i].kind : "";
+        if (strcmp(kind, "not_indexed_dir") != 0 && strcmp(kind, "not_indexed_file") != 0) {
+            failure_count++;
+        }
+    }
+
+    cbm_file_error_t *failures =
+        failure_count > 0 ? calloc((size_t)failure_count, sizeof(*failures)) : NULL;
+    if (failure_count > 0 && !failures) {
+        cbm_store_free_coverage(rows, row_count);
+        return false;
+    }
+
+    int n = 0;
+    for (int i = 0; i < row_count; i++) {
+        const char *kind = rows[i].kind ? rows[i].kind : "";
+        if (strcmp(kind, "not_indexed_dir") == 0 || strcmp(kind, "not_indexed_file") == 0) {
+            continue;
+        }
+        failures[n].path = (char *)rows[i].rel_path;
+        failures[n].reason = (char *)rows[i].detail;
+        failures[n].phase = (char *)rows[i].kind;
+        n++;
+    }
+
+    add_skipped_summary(doc, root, failures, failure_count, logfile);
+    add_parse_partial_summary(doc, root, failures, failure_count);
+    free(failures);
+    cbm_store_free_coverage(rows, row_count);
+    return true;
+}
+
 /* Write the FULL (uncapped) skip list to a per-run logfile — ONLY when >=1 file
  * was skipped (no logfile on a clean run). Location:
  *   $CBM_INDEX_LOG (override) else <cache_dir>/logs/<project>-<epoch>.log
@@ -7340,8 +7474,6 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
                                          const cbm_file_error_t *file_errors, int file_error_count,
                                          const char *logfile) {
     add_excluded_summary(doc, root, excluded_dirs, excluded_count);
-    add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
-    add_parse_partial_summary(doc, root, file_errors, file_error_count);
     add_not_indexed_files_summary(doc, root, p);
 
     int exp_nodes = -1;
@@ -7352,6 +7484,10 @@ static bool build_index_success_response(cbm_mcp_server_t *srv, yyjson_mut_doc *
     const int min_floor = CBM_DUMP_VERIFY_MIN_FLOOR;
 
     cbm_store_t *store = resolve_store(srv, project_name);
+    if (!store || !add_persisted_failure_summaries(doc, root, store, project_name, logfile)) {
+        add_skipped_summary(doc, root, file_errors, file_error_count, logfile);
+        add_parse_partial_summary(doc, root, file_errors, file_error_count);
+    }
     int nodes = 0;
     int edges = 0;
     bool degraded = false;
@@ -8708,16 +8844,6 @@ static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── search_code v2: graph-augmented code search ─────────────── */
 
-/* Strip non-ASCII bytes to guarantee valid UTF-8 JSON output */
-enum { ASCII_MAX = 127 };
-static void sanitize_ascii(char *s) {
-    for (unsigned char *p = (unsigned char *)s; *p; p++) {
-        if (*p > ASCII_MAX) {
-            *p = '?';
-        }
-    }
-}
-
 /* Intermediate grep match */
 typedef struct {
     char file[CBM_SZ_512];
@@ -8800,6 +8926,16 @@ bool cbm_search_code_file_pattern_can_prefilter(const char *file_pattern) {
 /* Build the grep/search command string based on scoped vs recursive mode.
  * On Windows, uses PowerShell Select-String with tab-delimited output.
  * On POSIX, uses grep with colon-delimited output. */
+/* Windows PowerShell 5.1 encodes stdout for a native-process pipe in the
+ * console OEM codepage, so any character the inherited CP cannot carry
+ * (Cyrillic under CP437/850, etc.) degrades to '?' before it ever reaches
+ * collect_grep_matches — and WHETHER it degrades depends on the console the
+ * server happened to inherit. Pin the pipe to UTF-8 inside every generated
+ * command so raw search content is codepage-independent. (The read side is
+ * already safe: Select-String decodes BOM-less UTF-8 via .NET StreamReader
+ * defaults.) */
+#define CBM_PS_UTF8_PRELUDE "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+
 void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bool scoped,
                                     const char *file_pattern, const char *tmpfile,
                                     const char *filelist, const char *root_path) {
@@ -8810,7 +8946,8 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
             if (cbm_search_code_file_pattern_can_prefilter(file_pattern)) {
                 snprintf(
                     cmd, cmd_sz,
-                    "powershell -Command \"$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                     "Get-Content -Encoding UTF8 -LiteralPath '%s'"
                     " | Where-Object { $_ -like '%s' }"
                     " | ForEach-Object { Select-String -LiteralPath $_ -Pattern $pat%s "
@@ -8821,7 +8958,8 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
             } else {
                 snprintf(
                     cmd, cmd_sz,
-                    "powershell -Command \"$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                     "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                     "-LiteralPath $_ -Pattern $pat%s "
                     "-ErrorAction SilentlyContinue }"
@@ -8832,7 +8970,8 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                 "-LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction SilentlyContinue }"
@@ -8843,7 +8982,8 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
                 "-ErrorAction SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
@@ -8852,7 +8992,8 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
+                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
                 "SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
@@ -8958,8 +9099,11 @@ static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, sear
         }
         char *source = read_file_lines(abs_path, s, e);
         if (source) {
-            sanitize_ascii(source);
-            yyjson_mut_obj_add_strcpy(doc, item, "source", source);
+            char *safe_source = sanitize_utf8_lossy(source);
+            if (safe_source) {
+                yyjson_mut_obj_add_strcpy(doc, item, "source", safe_source);
+                free(safe_source);
+            }
             free(source);
             if (truncated) {
                 yyjson_mut_obj_add_int(doc, item, "source_start", s);
@@ -8974,8 +9118,11 @@ static void attach_result_source(yyjson_mut_doc *doc, yyjson_mut_val *item, sear
         }
         char *ctx = read_file_lines(abs_path, ctx_start, ctx_end);
         if (ctx) {
-            sanitize_ascii(ctx);
-            yyjson_mut_obj_add_strcpy(doc, item, "context", ctx);
+            char *safe_context = sanitize_utf8_lossy(ctx);
+            if (safe_context) {
+                yyjson_mut_obj_add_strcpy(doc, item, "context", safe_context);
+                free(safe_context);
+            }
             yyjson_mut_obj_add_int(doc, item, "context_start", ctx_start);
             free(ctx);
         }
@@ -9147,16 +9294,17 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
                                build_dedup_files_array(doc, sr, output_count, raw, raw_count));
     } else {
         /* json-stringified tree: cols + column-ordered row arrays. FULL mode
-         * appends a per-row object cell with the (guarded, windowed) source —
-         * attach_result_source semantics unchanged. */
+         * appends a per-row object cell with the (guarded, windowed) source;
+         * context requests append the corresponding context object. */
+        bool attach_context = context_lines > 0 && mode != MODE_FULL;
         yyjson_mut_val *jcols = yyjson_mut_arr(doc);
         static const char *const sc_cols[] = {"qn",      "label", "file", "lines",
                                               "matches", "in",    "out"};
         for (size_t ci = 0; ci < sizeof(sc_cols) / sizeof(sc_cols[0]); ci++) {
             yyjson_mut_arr_add_str(doc, jcols, sc_cols[ci]);
         }
-        if (mode == MODE_FULL) {
-            yyjson_mut_arr_add_str(doc, jcols, "source");
+        if (mode == MODE_FULL || attach_context) {
+            yyjson_mut_arr_add_str(doc, jcols, mode == MODE_FULL ? "source" : "context");
         }
         yyjson_mut_obj_add_val(doc, root_obj, "cols", jcols);
 
@@ -9182,7 +9330,7 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
             yyjson_mut_arr_add_val(row, ml);
             yyjson_mut_arr_add_int(doc, row, r->in_degree);
             yyjson_mut_arr_add_int(doc, row, r->out_degree);
-            if (mode == MODE_FULL) {
+            if (mode == MODE_FULL || attach_context) {
                 yyjson_mut_val *src = yyjson_mut_obj(doc);
                 attach_result_source(doc, src, r, mode, context_lines, root_path);
                 yyjson_mut_arr_add_val(row, src);
@@ -9254,7 +9402,11 @@ static char *assemble_search_output(search_result_t *sr, int sr_count, grep_matc
 
     char *json = yy_doc_to_str(doc);
     if (json) {
-        sanitize_ascii(json);
+        char *safe_json = sanitize_utf8_lossy(json);
+        if (safe_json) {
+            free(json);
+            json = safe_json;
+        }
     }
     yyjson_mut_doc_free(doc);
 
@@ -9325,8 +9477,10 @@ static grep_match_t *collect_grep_matches(FILE *fp, const char *root_path, size_
         safe_grow(gm, gm_count, gm_cap, PAIR_LEN);
         snprintf(gm[gm_count].file, sizeof(gm[0].file), "%s", file);
         gm[gm_count].line = (int)strtol(sep1 + SKIP_ONE, NULL, CBM_DECIMAL_BASE);
-        snprintf(gm[gm_count].content, sizeof(gm[0].content), "%s", sep2 + SKIP_ONE);
-        sanitize_ascii(gm[gm_count].content);
+        char *safe_content = sanitize_utf8_lossy(sep2 + SKIP_ONE);
+        snprintf(gm[gm_count].content, sizeof(gm[0].content), "%s",
+                 safe_content ? safe_content : sep2 + SKIP_ONE);
+        free(safe_content);
         gm_count++;
     }
 
@@ -9703,6 +9857,32 @@ static bool compile_path_filter(const char *filter, cbm_regex_t *re) {
     return cbm_regcomp(re, filter, CBM_REG_EXTENDED | CBM_REG_NOSUB) == CBM_REG_OK;
 }
 
+static int mcp_run_shell_command_cancellable_bounded(cbm_mcp_server_t *srv, const char *command,
+                                                     char output_path[CBM_SZ_2K],
+                                                     size_t output_limit,
+                                                     bool *output_limit_exceeded,
+                                                     cbm_proc_result_t *result_out);
+
+#ifdef _WIN32
+static char *search_code_scan_error(search_scratch_t *scratch, const char *output_path,
+                                    bool has_path_filter, cbm_regex_t *path_regex, char *root_path,
+                                    char *pattern, char *project, char *file_pattern,
+                                    const char *message) {
+    if (output_path && output_path[0]) {
+        (void)cbm_unlink(output_path);
+    }
+    search_scratch_close(scratch);
+    if (has_path_filter) {
+        cbm_regfree(path_regex);
+    }
+    free(root_path);
+    free(pattern);
+    free(project);
+    free(file_pattern);
+    return cbm_mcp_text_result(message, true);
+}
+#endif
+
 static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     char *pattern = cbm_mcp_get_string_arg(args, "pattern");
     char *project = get_project_arg(args);
@@ -9886,6 +10066,44 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         cbm_search_code_build_grep_cmd(cmd, sizeof(cmd), use_regex, scoped, file_pattern, tmpfile,
                                        filelist, root_path);
 
+#ifdef _WIN32
+        char output_path[CBM_SZ_2K] = {0};
+        cbm_proc_result_t scan_result = {0};
+        bool scan_output_exceeded = false;
+        size_t scan_output_limit = srv->search_output_limit_override
+                                       ? srv->search_output_limit_override
+                                       : MCP_SEARCH_OUTPUT_MAX;
+        int scan_run = mcp_run_shell_command_cancellable_bounded(
+            srv, cmd, output_path, scan_output_limit, &scan_output_exceeded, &scan_result);
+        if (scan_output_exceeded) {
+            char message[CBM_SZ_128];
+            snprintf(message, sizeof(message),
+                     "search failed: output exceeded the %zu-byte safety limit", scan_output_limit);
+            return search_code_scan_error(&scratch, output_path, has_path_filter, &path_regex,
+                                          root_path, pattern, project, file_pattern, message);
+        }
+        bool scan_cancelled = scan_result.cancellation_requested || mcp_request_cancelled(srv);
+        if (scan_cancelled) {
+            return search_code_scan_error(&scratch, output_path, has_path_filter, &path_regex,
+                                          root_path, pattern, project, file_pattern,
+                                          "search_code cancelled for this request");
+        }
+        if (scan_run != 0) {
+            return search_code_scan_error(
+                &scratch, output_path, has_path_filter, &path_regex, root_path, pattern, project,
+                file_pattern, "search failed: the contained command could not complete");
+        }
+        FILE *fp = cbm_fopen(output_path, "rb");
+        if (!fp) {
+            return search_code_scan_error(&scratch, output_path, has_path_filter, &path_regex,
+                                          root_path, pattern, project, file_pattern,
+                                          "search failed: contained output could not be read");
+        }
+        gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
+                                  grep_limit, &gm_count);
+        (void)fclose(fp);
+        (void)cbm_unlink(output_path);
+#else
         FILE *fp = cbm_popen(cmd, "r");
         if (!fp) {
             search_scratch_close(&scratch);
@@ -9902,6 +10120,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         gm = collect_grep_matches(fp, root_path, strlen(root_path), has_path_filter, &path_regex,
                                   grep_limit, &gm_count);
         cbm_pclose(fp);
+#endif
         /* Both scratch files and the private directory go here — unlike the old
          * code, the file list is removed even when the scan was not scoped. */
         search_scratch_close(&scratch);
@@ -10062,10 +10281,16 @@ static bool mcp_resolve_windows_cmd(char out[CBM_SZ_4K]) {
 }
 #endif
 
-static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *command,
-                                             char output_path[CBM_SZ_2K],
-                                             cbm_proc_result_t *result_out) {
-    if (!srv || !command || !output_path || !result_out || !mcp_command_output_path(output_path)) {
+static int mcp_run_shell_command_cancellable_bounded(cbm_mcp_server_t *srv, const char *command,
+                                                     char output_path[CBM_SZ_2K],
+                                                     size_t output_limit,
+                                                     bool *output_limit_exceeded,
+                                                     cbm_proc_result_t *result_out) {
+    if (output_limit_exceeded) {
+        *output_limit_exceeded = false;
+    }
+    if (!srv || !command || !output_path || !result_out ||
+        (output_limit > 0 && !output_limit_exceeded) || !mcp_command_output_path(output_path)) {
         return -1;
     }
     /* Internal test seam: rejecting after output allocation exercises the same
@@ -10104,9 +10329,17 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
     }
 
     cbm_proc_poll_t state;
+    bool limit_exceeded = false;
     for (;;) {
         if (mcp_request_cancelled(srv)) {
             (void)cbm_subprocess_request_cancel(process);
+        }
+        if (!limit_exceeded && output_limit > 0) {
+            int64_t output_size = cbm_file_size(output_path);
+            if (output_size > 0 && (uint64_t)output_size > output_limit) {
+                limit_exceeded = true;
+                (void)cbm_subprocess_request_cancel(process);
+            }
         }
         state = cbm_subprocess_poll(process, result_out);
         if (state != CBM_PROC_POLL_RUNNING) {
@@ -10117,7 +10350,21 @@ static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *
     bool contained = state == CBM_PROC_POLL_TERMINAL && result_out->tree_quiesced &&
                      !result_out->supervision_failed;
     cbm_subprocess_destroy(process);
+    if (!limit_exceeded && output_limit > 0) {
+        int64_t final_size = cbm_file_size(output_path);
+        limit_exceeded = final_size > 0 && (uint64_t)final_size > output_limit;
+    }
+    if (output_limit_exceeded) {
+        *output_limit_exceeded = limit_exceeded;
+    }
     return contained ? 0 : -1;
+}
+
+static int mcp_run_shell_command_cancellable(cbm_mcp_server_t *srv, const char *command,
+                                             char output_path[CBM_SZ_2K],
+                                             cbm_proc_result_t *result_out) {
+    return mcp_run_shell_command_cancellable_bounded(srv, command, output_path, 0, NULL,
+                                                     result_out);
 }
 
 /* Does `node`'s line range overlap any recorded hunk for `file`? Used to scope
